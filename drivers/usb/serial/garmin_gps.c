@@ -432,7 +432,7 @@ static int gsp_rec_packet(struct garmin_data *garmin_data_p, int count)
 
 	/* sanity check, remove after test ... */
 	if ((__u8 *)&(usbdata[3]) != recpkt) {
-		dbg("%s - ptr mismatch %p - %p",
+		dbg("%s - ptr mismatch %pK - %pK",
 			__func__, &(usbdata[4]), recpkt);
 		return -EINVPKT;
 	}
@@ -971,10 +971,7 @@ static void garmin_close(struct usb_serial_port *port)
 	if (!serial)
 		return;
 
-	mutex_lock(&port->serial->disc_mutex);
-
-	if (!port->serial->disconnected)
-		garmin_clear(garmin_data_p);
+	garmin_clear(garmin_data_p);
 
 	/* shutdown our urbs */
 	usb_kill_urb(port->read_urb);
@@ -983,8 +980,6 @@ static void garmin_close(struct usb_serial_port *port)
 	/* keep reset state so we know that we must start a new session */
 	if (garmin_data_p->state != STATE_RESET)
 		garmin_data_p->state = STATE_DISCONNECTED;
-
-	mutex_unlock(&port->serial->disc_mutex);
 }
 
 

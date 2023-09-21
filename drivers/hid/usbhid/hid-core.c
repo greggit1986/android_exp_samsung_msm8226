@@ -203,7 +203,7 @@ static int usbhid_restart_out_queue(struct usbhid_device *usbhid)
 		return 0;
 
 	if ((kicked = (usbhid->outhead != usbhid->outtail))) {
-		dbg("Kicking head %d tail %d", usbhid->outhead, usbhid->outtail);
+		hid_dbg(hid, "Kicking head %d tail %d", usbhid->outhead, usbhid->outtail);
 
 		r = usb_autopm_get_interface_async(usbhid->intf);
 		if (r < 0)
@@ -230,7 +230,7 @@ static int usbhid_restart_ctrl_queue(struct usbhid_device *usbhid)
 		return 0;
 
 	if ((kicked = (usbhid->ctrlhead != usbhid->ctrltail))) {
-		dbg("Kicking head %d tail %d", usbhid->ctrlhead, usbhid->ctrltail);
+		hid_dbg(hid, "Kicking head %d tail %d", usbhid->ctrlhead, usbhid->ctrltail);
 
 		r = usb_autopm_get_interface_async(usbhid->intf);
 		if (r < 0)
@@ -399,6 +399,16 @@ static int hid_submit_ctrl(struct hid_device *hid)
  * Output interrupt completion handler.
  */
 
+static int irq_out_pump_restart(struct hid_device *hid)
+{
+	struct usbhid_device *usbhid = hid->driver_data;
+
+	if (usbhid->outhead != usbhid->outtail)
+		return hid_submit_out(hid);
+	else
+		return -1;
+}
+
 static void hid_irq_out(struct urb *urb)
 {
 	struct hid_device *hid = urb->context;
@@ -428,7 +438,7 @@ static void hid_irq_out(struct urb *urb)
 	else
 		usbhid->outtail = (usbhid->outtail + 1) & (HID_OUTPUT_FIFO_SIZE - 1);
 
-	if (usbhid->outhead != usbhid->outtail && !hid_submit_out(hid)) {
+	if (!irq_out_pump_restart(hid)) {
 		/* Successfully submitted next urb in queue */
 		spin_unlock_irqrestore(&usbhid->lock, flags);
 		return;
@@ -443,6 +453,15 @@ static void hid_irq_out(struct urb *urb)
 /*
  * Control pipe completion handler.
  */
+static int ctrl_pump_restart(struct hid_device *hid)
+{
+	struct usbhid_device *usbhid = hid->driver_data;
+
+	if (usbhid->ctrlhead != usbhid->ctrltail)
+		return hid_submit_ctrl(hid);
+	else
+		return -1;
+}
 
 static void hid_ctrl(struct urb *urb)
 {
@@ -476,7 +495,7 @@ static void hid_ctrl(struct urb *urb)
 	else
 		usbhid->ctrltail = (usbhid->ctrltail + 1) & (HID_CONTROL_FIFO_SIZE - 1);
 
-	if (usbhid->ctrlhead != usbhid->ctrltail && !hid_submit_ctrl(hid)) {
+	if (!ctrl_pump_restart(hid)) {
 		/* Successfully submitted next urb in queue */
 		spin_unlock(&usbhid->lock);
 		return;
@@ -535,11 +554,27 @@ static void __usbhid_submit_report(struct hid_device *hid, struct hid_report *re
 			 * the queue is known to run
 			 * but an earlier request may be stuck
 			 * we may need to time out
-			 * no race because this is called under
+			 * no race because the URB is blocked under
 			 * spinlock
 			 */
-			if (time_after(jiffies, usbhid->last_out + HZ * 5))
+			if (time_after(jiffies, usbhid->last_out + HZ * 5)) {
+				usb_block_urb(usbhid->urbout);
+				/* drop lock to not deadlock if the callback is called */
+				spin_unlock(&usbhid->lock);
 				usb_unlink_urb(usbhid->urbout);
+				spin_lock(&usbhid->lock);
+				usb_unblock_urb(usbhid->urbout);
+				/*
+				 * if the unlinking has already completed
+				 * the pump will have been stopped
+				 * it must be restarted now
+				 */
+				if (!test_bit(HID_OUT_RUNNING, &usbhid->iofl))
+					if (!irq_out_pump_restart(hid))
+						set_bit(HID_OUT_RUNNING, &usbhid->iofl);
+
+
+			}
 		}
 		return;
 	}
@@ -583,11 +618,25 @@ static void __usbhid_submit_report(struct hid_device *hid, struct hid_report *re
 		 * the queue is known to run
 		 * but an earlier request may be stuck
 		 * we may need to time out
-		 * no race because this is called under
+		 * no race because the URB is blocked under
 		 * spinlock
 		 */
-		if (time_after(jiffies, usbhid->last_ctrl + HZ * 5))
+		if (time_after(jiffies, usbhid->last_ctrl + HZ * 5)) {
+			usb_block_urb(usbhid->urbctrl);
+			/* drop lock to not deadlock if the callback is called */
+			spin_unlock(&usbhid->lock);
 			usb_unlink_urb(usbhid->urbctrl);
+			spin_lock(&usbhid->lock);
+			usb_unblock_urb(usbhid->urbctrl);
+			/*
+			 * if the unlinking has already completed
+			 * the pump will have been stopped
+			 * it must be restarted now
+			 */
+			if (!test_bit(HID_CTRL_RUNNING, &usbhid->iofl))
+				if (!ctrl_pump_restart(hid))
+					set_bit(HID_CTRL_RUNNING, &usbhid->iofl);
+		}
 	}
 }
 
@@ -960,6 +1009,8 @@ static int usbhid_parse(struct hid_device *hid)
 	unsigned int rsize = 0;
 	char *rdesc;
 	int ret, n;
+	int num_descriptors;
+	size_t offset = offsetof(struct hid_descriptor, desc); 
 
 	quirks = usbhid_lookup_quirk(le16_to_cpu(dev->descriptor.idVendor),
 			le16_to_cpu(dev->descriptor.idProduct));
@@ -982,10 +1033,18 @@ static int usbhid_parse(struct hid_device *hid)
 		return -ENODEV;
 	}
 
+	if (hdesc->bLength < sizeof(struct hid_descriptor)) {
+		dbg_hid("hid descriptor is too short\n");
+		return -EINVAL;
+	}
+
 	hid->version = le16_to_cpu(hdesc->bcdHID);
 	hid->country = hdesc->bCountryCode;
 
-	for (n = 0; n < hdesc->bNumDescriptors; n++)
+	num_descriptors = min_t(int, hdesc->bNumDescriptors,
+		(hdesc->bLength - offset) / sizeof(struct hid_class_descriptor));
+
+	for (n = 0; n < num_descriptors; n++)
 		if (hdesc->desc[n].bDescriptorType == HID_DT_REPORT)
 			rsize = le16_to_cpu(hdesc->desc[n].wDescriptorLength);
 
@@ -1504,28 +1563,15 @@ static struct usb_driver hid_driver = {
 	.supports_autosuspend = 1,
 };
 
-static const struct hid_device_id hid_usb_table[] = {
-	{ HID_USB_DEVICE(HID_ANY_ID, HID_ANY_ID) },
-	{ }
-};
-
 struct usb_interface *usbhid_find_interface(int minor)
 {
 	return usb_find_interface(&hid_driver, minor);
 }
 
-static struct hid_driver hid_usb_driver = {
-	.name = "generic-usb",
-	.id_table = hid_usb_table,
-};
-
 static int __init hid_init(void)
 {
 	int retval = -ENOMEM;
 
-	retval = hid_register_driver(&hid_usb_driver);
-	if (retval)
-		goto hid_register_fail;
 	retval = usbhid_quirks_init(quirks_param);
 	if (retval)
 		goto usbhid_quirks_init_fail;
@@ -1538,8 +1584,6 @@ static int __init hid_init(void)
 usb_register_fail:
 	usbhid_quirks_exit();
 usbhid_quirks_init_fail:
-	hid_unregister_driver(&hid_usb_driver);
-hid_register_fail:
 	return retval;
 }
 
@@ -1547,7 +1591,6 @@ static void __exit hid_exit(void)
 {
 	usb_deregister(&hid_driver);
 	usbhid_quirks_exit();
-	hid_unregister_driver(&hid_usb_driver);
 }
 
 module_init(hid_init);

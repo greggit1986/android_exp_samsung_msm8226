@@ -2913,8 +2913,10 @@ void sec_param_restart_reason(const char *cmd)
 		&& !kstrtoul(cmd + 5, 0, &value)) {
 		param_restart_reason = (0xabce0000 | value);
 #endif
+#if !defined(CONFIG_SAMSUNG_PRODUCT_SHIP)
 		} else if (!strncmp(cmd, "edl", 3)) {
 			param_restart_reason = 0x0; // Hack. Fix it later
+#endif
 		} else if (strlen(cmd) == 0) {
 		    printk(KERN_NOTICE "%s : value of cmd is NULL.\n", __func__);
 		        param_restart_reason = 0x12345678;

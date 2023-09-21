@@ -317,12 +317,17 @@ struct hid_item {
 #define HID_QUIRK_BADPAD			0x00000020
 #define HID_QUIRK_MULTI_INPUT			0x00000040
 #define HID_QUIRK_HIDINPUT_FORCE		0x00000080
-#define HID_QUIRK_MULTITOUCH			0x00000100
 #define HID_QUIRK_SKIP_OUTPUT_REPORTS		0x00010000
 #define HID_QUIRK_FULLSPEED_INTERVAL		0x10000000
 #define HID_QUIRK_NO_INIT_REPORTS		0x20000000
 #define HID_QUIRK_NO_IGNORE			0x40000000
 #define HID_QUIRK_NO_INPUT_SYNC			0x80000000
+
+/*
+ * HID device groups
+ */
+#define HID_GROUP_GENERIC			0x0001
+#define HID_GROUP_MULTITOUCH			0x0002
 
 /*
  * This is the global environment of the parser. This information is
@@ -469,6 +474,8 @@ struct hid_driver;
 struct hid_ll_driver;
 
 struct hid_device {							/* device report descriptor */
+	__u8 *dev_rdesc;
+	unsigned dev_rsize;
 	__u8 *rdesc;
 	unsigned rsize;
 	struct hid_collection *collection;				/* List of HID collections */
@@ -476,12 +483,14 @@ struct hid_device {							/* device report descriptor */
 	unsigned maxcollection;						/* Number of parsed collections */
 	unsigned maxapplication;					/* Number of applications */
 	__u16 bus;							/* BUS ID */
+	__u16 group;							/* Report group */
 	__u32 vendor;							/* Vendor ID */
 	__u32 product;							/* Product ID */
 	__u32 version;							/* HID version */
 	enum hid_type type;						/* device type (mouse, kbd, ...) */
 	unsigned country;						/* HID country */
 	struct hid_report_enum report_enum[HID_REPORT_TYPES];
+	struct work_struct led_work;					/* delayed LED worker */
 
 	struct semaphore driver_lock;					/* protects the current driver */
 	struct device dev;						/* device */
@@ -581,12 +590,12 @@ struct hid_descriptor {
 	struct hid_class_descriptor desc[1];
 } __attribute__ ((packed));
 
-#define HID_DEVICE(b, ven, prod) \
-	.bus = (b), \
-	.vendor = (ven), .product = (prod)
-
-#define HID_USB_DEVICE(ven, prod)	HID_DEVICE(BUS_USB, ven, prod)
-#define HID_BLUETOOTH_DEVICE(ven, prod)	HID_DEVICE(BUS_BLUETOOTH, ven, prod)
+#define HID_DEVICE(b, g, ven, prod)					\
+	.bus = (b), .group = (g), .vendor = (ven), .product = (prod)
+#define HID_USB_DEVICE(ven, prod)				\
+	.bus = BUS_USB, .vendor = (ven), .product = (prod)
+#define HID_BLUETOOTH_DEVICE(ven, prod)					\
+	.bus = BUS_BLUETOOTH, .vendor = (ven), .product = (prod)
 
 #define HID_REPORT_ID(rep) \
 	.report_type = (rep)
@@ -742,6 +751,11 @@ void hid_output_report(struct hid_report *report, __u8 *data);
 struct hid_device *hid_allocate_device(void);
 struct hid_report *hid_register_report(struct hid_device *device, unsigned type, unsigned id);
 int hid_parse_report(struct hid_device *hid, __u8 *start, unsigned size);
+int hid_open_report(struct hid_device *device);
+struct hid_report *hid_validate_values(struct hid_device *hid,
+				       unsigned int type, unsigned int id,
+				       unsigned int field_index,
+				       unsigned int report_counts);
 int hid_check_keys_pressed(struct hid_device *hid);
 int hid_connect(struct hid_device *hid, unsigned int connect_mask);
 void hid_disconnect(struct hid_device *hid);
@@ -757,34 +771,49 @@ const struct hid_device_id *hid_match_id(struct hid_device *hdev,
  * @max: maximal valid usage->code to consider later (out parameter)
  * @type: input event type (EV_KEY, EV_REL, ...)
  * @c: code which corresponds to this usage and type
+ *
+ * The value pointed to by @bit will be set to NULL if either @type is
+ * an unhandled event type, or if @c is out of range for @type. This
+ * can be used as an error condition.
  */
 static inline void hid_map_usage(struct hid_input *hidinput,
 		struct hid_usage *usage, unsigned long **bit, int *max,
-		__u8 type, __u16 c)
+		__u8 type, unsigned int c)
 {
 	struct input_dev *input = hidinput->input;
-
-	usage->type = type;
-	usage->code = c;
+	unsigned long *bmap = NULL;
+	unsigned int limit = 0;
 
 	switch (type) {
 	case EV_ABS:
-		*bit = input->absbit;
-		*max = ABS_MAX;
+		bmap = input->absbit;
+		limit = ABS_MAX;
 		break;
 	case EV_REL:
-		*bit = input->relbit;
-		*max = REL_MAX;
+		bmap = input->relbit;
+		limit = REL_MAX;
 		break;
 	case EV_KEY:
-		*bit = input->keybit;
-		*max = KEY_MAX;
+		bmap = input->keybit;
+		limit = KEY_MAX;
 		break;
 	case EV_LED:
-		*bit = input->ledbit;
-		*max = LED_MAX;
+		bmap = input->ledbit;
+		limit = LED_MAX;
 		break;
 	}
+
+	if (unlikely(c > limit || !bmap)) {
+		pr_warn_ratelimited("%s: Invalid code %d type %d\n",
+				    input->name, c, type);
+		*bit = NULL;
+		return;
+	}
+
+	usage->type = type;
+	usage->code = c;
+	*max = limit;
+	*bit = bmap;
 }
 
 /**
@@ -798,7 +827,8 @@ static inline void hid_map_usage_clear(struct hid_input *hidinput,
 		__u8 type, __u16 c)
 {
 	hid_map_usage(hidinput, usage, bit, max, type, c);
-	clear_bit(c, *bit);
+	if (*bit)
+		clear_bit(usage->code, *bit);
 }
 
 /**
@@ -812,16 +842,7 @@ static inline void hid_map_usage_clear(struct hid_input *hidinput,
  */
 static inline int __must_check hid_parse(struct hid_device *hdev)
 {
-	int ret;
-
-	if (hdev->status & HID_STAT_PARSED)
-		return 0;
-
-	ret = hdev->ll_driver->parse(hdev);
-	if (!ret)
-		hdev->status |= HID_STAT_PARSED;
-
-	return ret;
+	return hid_open_report(hdev);
 }
 
 /**
@@ -903,7 +924,7 @@ static inline int hid_hw_power(struct hid_device *hdev, int level)
 	return hdev->ll_driver->power ? hdev->ll_driver->power(hdev, level) : 0;
 }
 
-void hid_report_raw_event(struct hid_device *hid, int type, u8 *data, int size,
+int hid_report_raw_event(struct hid_device *hid, int type, u8 *data, int size,
 		int interrupt);
 
 extern int hid_generic_init(void);

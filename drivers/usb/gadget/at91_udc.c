@@ -138,7 +138,7 @@ static void proc_ep_show(struct seq_file *s, struct at91_ep *ep)
 	else list_for_each_entry (req, &ep->queue, queue) {
 		unsigned	length = req->req.actual;
 
-		seq_printf(s, "\treq %p len %d/%d buf %p\n",
+		seq_printf(s, "\treq %pK len %d/%d buf %pK\n",
 				&req->req, length,
 				req->req.length, req->req.buf);
 	}
@@ -264,7 +264,7 @@ static void done(struct at91_ep *ep, struct at91_request *req, int status)
 	else
 		status = req->req.status;
 	if (status && status != -ESHUTDOWN)
-		VDBG("%s done %p, status %d\n", ep->ep.name, req, status);
+		VDBG("%s done %pK, status %d\n", ep->ep.name, req, status);
 
 	ep->stopped = 1;
 	spin_unlock(&udc->lock);
@@ -353,7 +353,7 @@ rescan:
 	if (count == bufferspace)
 		is_done = 1;
 
-	PACKET("%s %p out/%d%s\n", ep->ep.name, &req->req, count,
+	PACKET("%s %pK out/%d%s\n", ep->ep.name, &req->req, count,
 			is_done ? " (done)" : "");
 
 	/*
@@ -440,7 +440,7 @@ static int write_fifo(struct at91_ep *ep, struct at91_request *req)
 	__raw_writel(csr, creg);
 	req->req.actual += count;
 
-	PACKET("%s %p in/%d%s\n", ep->ep.name, &req->req, count,
+	PACKET("%s %pK in/%d%s\n", ep->ep.name, &req->req, count,
 			is_last ? " (done)" : "");
 	if (is_last)
 		done(ep, req, 0);
@@ -1735,19 +1735,9 @@ static int __devinit at91udc_probe(struct platform_device *pdev)
 	int		retval;
 	struct resource	*res;
 
-	if (!dev->platform_data) {
+	if (!dev->platform_data && !pdev->dev.of_node) {
 		/* small (so we copy it) but critical! */
 		DBG("missing platform_data\n");
-		return -ENODEV;
-	}
-
-	if (pdev->num_resources != 2) {
-		DBG("invalid num_resources\n");
-		return -ENODEV;
-	}
-	if ((pdev->resource[0].flags != IORESOURCE_MEM)
-			|| (pdev->resource[1].flags != IORESOURCE_IRQ)) {
-		DBG("invalid resource type\n");
 		return -ENODEV;
 	}
 

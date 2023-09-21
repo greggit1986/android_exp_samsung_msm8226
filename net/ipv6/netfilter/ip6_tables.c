@@ -133,7 +133,7 @@ ip6_packet_match(const struct sk_buff *skb,
 		int protohdr;
 		unsigned short _frag_off;
 
-		protohdr = ipv6_find_hdr(skb, protoff, -1, &_frag_off);
+		protohdr = ipv6_find_hdr(skb, protoff, -1, &_frag_off, NULL);
 		if (protohdr < 0) {
 			if (_frag_off == 0)
 				*hotdrop = true;
@@ -195,11 +195,12 @@ get_entry(const void *base, unsigned int offset)
 
 /* All zeroes == unconditional rule. */
 /* Mildly perf critical (only if packet tracing is on) */
-static inline bool unconditional(const struct ip6t_ip6 *ipv6)
+static inline bool unconditional(const struct ip6t_entry *e)
 {
 	static const struct ip6t_ip6 uncond;
 
-	return memcmp(ipv6, &uncond, sizeof(uncond)) == 0;
+	return e->target_offset == sizeof(struct ip6t_entry) &&
+	       memcmp(&e->ipv6, &uncond, sizeof(uncond)) == 0;
 }
 
 static inline const struct xt_entry_target *
@@ -256,11 +257,10 @@ get_chainname_rulenum(const struct ip6t_entry *s, const struct ip6t_entry *e,
 	} else if (s == e) {
 		(*rulenum)++;
 
-		if (s->target_offset == sizeof(struct ip6t_entry) &&
+		if (unconditional(s) &&
 		    strcmp(t->target.u.kernel.target->name,
 			   XT_STANDARD_TARGET) == 0 &&
-		    t->verdict < 0 &&
-		    unconditional(&s->ipv6)) {
+		    t->verdict < 0) {
 			/* Tail of chains: STANDARD target (return/policy) */
 			*comment = *chainname == hookname
 				? comments[NF_IP6_TRACE_COMMENT_POLICY]
@@ -368,6 +368,7 @@ ip6t_do_table(struct sk_buff *skb,
 		const struct xt_entry_match *ematch;
 
 		IP_NF_ASSERT(e);
+		acpar.thoff = 0;
 		if (!ip6_packet_match(skb, indev, outdev, &e->ipv6,
 		    &acpar.thoff, &acpar.fragoff, &acpar.hotdrop)) {
  no_match:
@@ -484,11 +485,10 @@ mark_source_chains(const struct xt_table_info *newinfo,
 			e->comefrom |= ((1 << hook) | (1 << NF_INET_NUMHOOKS));
 
 			/* Unconditional return/END. */
-			if ((e->target_offset == sizeof(struct ip6t_entry) &&
+			if ((unconditional(e) &&
 			     (strcmp(t->target.u.user.name,
 				     XT_STANDARD_TARGET) == 0) &&
-			     t->verdict < 0 &&
-			     unconditional(&e->ipv6)) || visited) {
+			     t->verdict < 0) || visited) {
 				unsigned int oldpos, size;
 
 				if ((strcmp(t->target.u.user.name,
@@ -529,6 +529,8 @@ mark_source_chains(const struct xt_table_info *newinfo,
 				size = e->next_offset;
 				e = (struct ip6t_entry *)
 					(entry0 + pos + size);
+				if (pos + size >= newinfo->size)
+					return 0;
 				e->counters.pcnt = pos;
 				pos += size;
 			} else {
@@ -550,6 +552,8 @@ mark_source_chains(const struct xt_table_info *newinfo,
 				} else {
 					/* ... this is a fallthru */
 					newpos = pos + e->next_offset;
+					if (newpos >= newinfo->size)
+						return 0;
 				}
 				e = (struct ip6t_entry *)
 					(entry0 + newpos);
@@ -577,14 +581,12 @@ static void cleanup_match(struct xt_entry_match *m, struct net *net)
 }
 
 static int
-check_entry(const struct ip6t_entry *e, const char *name)
+check_entry(const struct ip6t_entry *e)
 {
 	const struct xt_entry_target *t;
 
-	if (!ip6_checkentry(&e->ipv6)) {
-		duprintf("ip_tables: ip check failed %p %s.\n", e, name);
+	if (!ip6_checkentry(&e->ipv6))
 		return -EINVAL;
-	}
 
 	if (e->target_offset + sizeof(struct xt_entry_target) >
 	    e->next_offset)
@@ -675,10 +677,6 @@ find_check_entry(struct ip6t_entry *e, struct net *net, const char *name,
 	struct xt_mtchk_param mtpar;
 	struct xt_entry_match *ematch;
 
-	ret = check_entry(e, name);
-	if (ret)
-		return ret;
-
 	j = 0;
 	mtpar.net	= net;
 	mtpar.table     = name;
@@ -722,7 +720,7 @@ static bool check_underflow(const struct ip6t_entry *e)
 	const struct xt_entry_target *t;
 	unsigned int verdict;
 
-	if (!unconditional(&e->ipv6))
+	if (!unconditional(e))
 		return false;
 	t = ip6t_get_target_c(e);
 	if (strcmp(t->u.user.name, XT_STANDARD_TARGET) != 0)
@@ -742,9 +740,11 @@ check_entry_size_and_hooks(struct ip6t_entry *e,
 			   unsigned int valid_hooks)
 {
 	unsigned int h;
+	int err;
 
 	if ((unsigned long)e % __alignof__(struct ip6t_entry) != 0 ||
-	    (unsigned char *)e + sizeof(struct ip6t_entry) >= limit) {
+	    (unsigned char *)e + sizeof(struct ip6t_entry) >= limit ||
+	    (unsigned char *)e + e->next_offset > limit) {
 		duprintf("Bad offset %p\n", e);
 		return -EINVAL;
 	}
@@ -756,6 +756,10 @@ check_entry_size_and_hooks(struct ip6t_entry *e,
 		return -EINVAL;
 	}
 
+	err = check_entry(e);
+	if (err)
+		return err;
+
 	/* Check hooks & underflows */
 	for (h = 0; h < NF_INET_NUMHOOKS; h++) {
 		if (!(valid_hooks & (1 << h)))
@@ -764,9 +768,9 @@ check_entry_size_and_hooks(struct ip6t_entry *e,
 			newinfo->hook_entry[h] = hook_entries[h];
 		if ((unsigned char *)e - base == underflows[h]) {
 			if (!check_underflow(e)) {
-				pr_err("Underflows must be unconditional and "
-				       "use the STANDARD target with "
-				       "ACCEPT/DROP\n");
+				pr_debug("Underflows must be unconditional and "
+					 "use the STANDARD target with "
+					 "ACCEPT/DROP\n");
 				return -EINVAL;
 			}
 			newinfo->underflow[h] = underflows[h];
@@ -1243,8 +1247,10 @@ __do_replace(struct net *net, const char *name, unsigned int valid_hooks,
 
 	xt_free_table_info(oldinfo);
 	if (copy_to_user(counters_ptr, counters,
-			 sizeof(struct xt_counters) * num_counters) != 0)
-		ret = -EFAULT;
+			 sizeof(struct xt_counters) * num_counters) != 0) {
+		/* Silent error, can't fail, new table is already in place */
+		net_warn_ratelimited("ip6tables: counters copy to user failed while replacing table\n");
+	}
 	vfree(counters);
 	xt_table_unlock(t);
 	return ret;
@@ -1502,7 +1508,8 @@ check_compat_entry_size_and_hooks(struct compat_ip6t_entry *e,
 
 	duprintf("check_compat_entry_size_and_hooks %p\n", e);
 	if ((unsigned long)e % __alignof__(struct compat_ip6t_entry) != 0 ||
-	    (unsigned char *)e + sizeof(struct compat_ip6t_entry) >= limit) {
+	    (unsigned char *)e + sizeof(struct compat_ip6t_entry) >= limit ||
+	    (unsigned char *)e + e->next_offset > limit) {
 		duprintf("Bad offset %p, limit = %p\n", e, limit);
 		return -EINVAL;
 	}
@@ -1515,7 +1522,7 @@ check_compat_entry_size_and_hooks(struct compat_ip6t_entry *e,
 	}
 
 	/* For purposes of check_entry casting the compat entry is fine */
-	ret = check_entry((struct ip6t_entry *)e, name);
+	ret = check_entry((struct ip6t_entry *)e);
 	if (ret)
 		return ret;
 
@@ -2285,6 +2292,10 @@ static void __exit ip6_tables_fini(void)
  * if target < 0. "last header" is transport protocol header, ESP, or
  * "No next header".
  *
+ * Note that *offset is used as input/output parameter. an if it is not zero,
+ * then it must be a valid offset to an inner IPv6 header. This can be used
+ * to explore inner IPv6 header, eg. ICMPv6 error messages.
+ *
  * If target header is found, its offset is set in *offset and return protocol
  * number. Otherwise, return -ENOENT or -EBADMSG.
  *
@@ -2295,16 +2306,33 @@ static void __exit ip6_tables_fini(void)
  * of last header" is "next header" field in Fragment header. In this case,
  * *offset is meaningless. If fragoff is not NULL, the fragment offset is
  * stored in *fragoff; if it is NULL, return -EINVAL.
+ *
+ * if flags is not NULL and it's a fragment, then the frag flag IP6T_FH_F_FRAG
+ * will be set. If it's an AH header, the IP6T_FH_F_AUTH flag is set and
+ * target < 0, then this function will stop at the AH header.
  */
 int ipv6_find_hdr(const struct sk_buff *skb, unsigned int *offset,
-		  int target, unsigned short *fragoff)
+		  int target, unsigned short *fragoff, int *flags)
 {
 	unsigned int start = skb_network_offset(skb) + sizeof(struct ipv6hdr);
 	u8 nexthdr = ipv6_hdr(skb)->nexthdr;
-	unsigned int len = skb->len - start;
+	unsigned int len;
 
 	if (fragoff)
 		*fragoff = 0;
+
+	if (*offset) {
+		struct ipv6hdr _ip6, *ip6;
+
+		ip6 = skb_header_pointer(skb, *offset, sizeof(_ip6), &_ip6);
+		if (!ip6 || (ip6->version != 6)) {
+			printk(KERN_ERR "IPv6 header not found\n");
+			return -EBADMSG;
+		}
+		start = *offset + sizeof(struct ipv6hdr);
+		nexthdr = ip6->nexthdr;
+	}
+	len = skb->len - start;
 
 	while (nexthdr != target) {
 		struct ipv6_opt_hdr _hdr, *hp;
@@ -2322,6 +2350,9 @@ int ipv6_find_hdr(const struct sk_buff *skb, unsigned int *offset,
 		if (nexthdr == NEXTHDR_FRAGMENT) {
 			unsigned short _frag_off;
 			__be16 *fp;
+
+			if (flags)	/* Indicate that this is a fragment */
+				*flags |= IP6T_FH_F_FRAG;
 			fp = skb_header_pointer(skb,
 						start+offsetof(struct frag_hdr,
 							       frag_off),
@@ -2345,9 +2376,11 @@ int ipv6_find_hdr(const struct sk_buff *skb, unsigned int *offset,
 				return -ENOENT;
 			}
 			hdrlen = 8;
-		} else if (nexthdr == NEXTHDR_AUTH)
+		} else if (nexthdr == NEXTHDR_AUTH) {
+			if (flags && (*flags & IP6T_FH_F_AUTH) && (target < 0))
+				break;
 			hdrlen = (hp->hdrlen + 2) << 2;
-		else
+		} else
 			hdrlen = ipv6_optlen(hp);
 
 		nexthdr = hp->nexthdr;

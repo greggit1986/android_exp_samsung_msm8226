@@ -27,13 +27,14 @@
 #include <linux/uaccess.h>
 #include <linux/wakelock.h>
 #include <linux/regulator/consumer.h>
+#include <linux/syscalls.h>
 #include "sx9500_reg.h"
 #include "sensors_core.h"
 
 #define VENDOR_NAME              "SEMTECH"
 #define MODEL_NAME               "SX9500"
 #define MODULE_NAME              "grip_sensor"
-#define CALIBRATION_FILE_PATH    "/efs/grip_cal_data"
+#define CALIBRATION_FILE_PATH    (!sys_access("/efs/grip_cal_data",4))?"/efs/grip_cal_data":"/efs/FactoryApp/grip_cal_data"
 
 #define I2C_M_WR                 0 /* for i2c Write */
 #define I2c_M_RD                 1 /* for i2c Read */
@@ -458,6 +459,8 @@ static void sx9500_open_caldata(struct sx9500_p *data)
 
 	old_fs = get_fs();
 	set_fs(KERNEL_DS);
+
+	pr_info("[SX9500]: %s - CAL_FILE_PATH: %s\n", __func__, CALIBRATION_FILE_PATH);
 
 	cal_filp = filp_open(CALIBRATION_FILE_PATH, O_RDONLY,
 			S_IRUGO | S_IWUSR | S_IWGRP);

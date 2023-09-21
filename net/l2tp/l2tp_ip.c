@@ -148,19 +148,19 @@ static int l2tp_ip_recv(struct sk_buff *skb)
 	}
 
 	/* Ok, this is a data packet. Lookup the session. */
-	session = l2tp_session_find(&init_net, NULL, session_id);
-	if (session == NULL)
+	session = l2tp_session_get(&init_net, NULL, session_id, true);
+	if (!session)
 		goto discard;
 
 	tunnel = session->tunnel;
-	if (tunnel == NULL)
-		goto discard;
+	if (!tunnel)
+		goto discard_sess;
 
 	/* Trace packet contents, if enabled */
 	if (tunnel->debug & L2TP_MSG_DATA) {
 		length = min(32u, skb->len);
 		if (!pskb_may_pull(skb, length))
-			goto discard;
+			goto discard_sess;
 
 		printk(KERN_DEBUG "%s: ip recv: ", tunnel->name);
 
@@ -173,6 +173,7 @@ static int l2tp_ip_recv(struct sk_buff *skb)
 	}
 
 	l2tp_recv_common(session, skb, ptr, optr, 0, skb->len, tunnel->recv_payload_hook);
+	l2tp_session_dec_refcount(session);
 
 	return 0;
 
@@ -207,6 +208,12 @@ pass_up:
 	nf_reset(skb);
 
 	return sk_receive_skb(sk, skb, 1);
+
+discard_sess:
+	if (session->deref)
+		session->deref(session);
+	l2tp_session_dec_refcount(session);
+	goto discard;
 
 discard_put:
 	sock_put(sk);
@@ -251,8 +258,13 @@ static int l2tp_ip_bind(struct sock *sk, struct sockaddr *uaddr, int addr_len)
 {
 	struct inet_sock *inet = inet_sk(sk);
 	struct sockaddr_l2tpip *addr = (struct sockaddr_l2tpip *) uaddr;
-	int ret = -EINVAL;
+	int ret;
 	int chk_addr_ret;
+
+	if (addr_len < sizeof(struct sockaddr_l2tpip))
+		return -EINVAL;
+	if (addr->l2tp_family != AF_INET)
+		return -EINVAL;
 
 	ret = -EADDRINUSE;
 	read_lock_bh(&l2tp_ip_lock);
@@ -262,6 +274,9 @@ static int l2tp_ip_bind(struct sock *sk, struct sockaddr *uaddr, int addr_len)
 	read_unlock_bh(&l2tp_ip_lock);
 
 	lock_sock(sk);
+	if (!sock_flag(sk, SOCK_ZAPPED))
+		goto out;
+
 	if (sk->sk_state != TCP_CLOSE || addr_len < sizeof(struct sockaddr_l2tpip))
 		goto out;
 
@@ -284,6 +299,8 @@ static int l2tp_ip_bind(struct sock *sk, struct sockaddr *uaddr, int addr_len)
 	sk_del_node_init(sk);
 	write_unlock_bh(&l2tp_ip_lock);
 	ret = 0;
+	sock_reset_flag(sk, SOCK_ZAPPED);
+
 out:
 	release_sock(sk);
 
@@ -304,13 +321,14 @@ static int l2tp_ip_connect(struct sock *sk, struct sockaddr *uaddr, int addr_len
 	__be32 saddr;
 	int oif, rc;
 
-	rc = -EINVAL;
-	if (addr_len < sizeof(*lsa))
-		goto out;
+	if (sock_flag(sk, SOCK_ZAPPED)) /* Must bind first - autobinding does not work */
+		return -EINVAL;
 
-	rc = -EAFNOSUPPORT;
+	if (addr_len < sizeof(*lsa))
+		return -EINVAL;
+
 	if (lsa->l2tp_family != AF_INET)
-		goto out;
+		return -EAFNOSUPPORT;
 
 	lock_sock(sk);
 
@@ -362,6 +380,14 @@ static int l2tp_ip_connect(struct sock *sk, struct sockaddr *uaddr, int addr_len
 out:
 	release_sock(sk);
 	return rc;
+}
+
+static int l2tp_ip_disconnect(struct sock *sk, int flags)
+{
+	if (sock_flag(sk, SOCK_ZAPPED))
+		return 0;
+
+	return udp_disconnect(sk, flags);
 }
 
 static int l2tp_ip_getname(struct socket *sock, struct sockaddr *uaddr,
@@ -498,10 +524,12 @@ static int l2tp_ip_sendmsg(struct kiocb *iocb, struct sock *sk, struct msghdr *m
 					   sk->sk_bound_dev_if);
 		if (IS_ERR(rt))
 			goto no_route;
-		if (connected)
+		if (connected) {
 			sk_setup_caps(sk, &rt->dst);
-		else
-			dst_release(&rt->dst); /* safe since we hold rcu_read_lock */
+		} else {
+			skb_dst_set(skb, &rt->dst);
+			goto xmit;
+		}
 	}
 
 	/* We dont need to clone dst here, it is guaranteed to not disappear.
@@ -509,6 +537,7 @@ static int l2tp_ip_sendmsg(struct kiocb *iocb, struct sock *sk, struct msghdr *m
 	 */
 	skb_dst_set_noref(skb, &rt->dst);
 
+xmit:
 	/* Queue the packet to IP for output */
 	rc = ip_queue_xmit(skb, &inet->cork.fl);
 	rcu_read_unlock();
@@ -548,9 +577,6 @@ static int l2tp_ip_recvmsg(struct kiocb *iocb, struct sock *sk, struct msghdr *m
 	if (flags & MSG_OOB)
 		goto out;
 
-	if (addr_len)
-		*addr_len = sizeof(*sin);
-
 	skb = skb_recv_datagram(sk, flags, noblock, &err);
 	if (!skb)
 		goto out;
@@ -573,6 +599,7 @@ static int l2tp_ip_recvmsg(struct kiocb *iocb, struct sock *sk, struct msghdr *m
 		sin->sin_addr.s_addr = ip_hdr(skb)->saddr;
 		sin->sin_port = 0;
 		memset(&sin->sin_zero, 0, sizeof(sin->sin_zero));
+		*addr_len = sizeof(*sin);
 	}
 	if (inet->cmsg_flags)
 		ip_cmsg_recv(msg, skb);
@@ -599,7 +626,7 @@ static struct proto l2tp_ip_prot = {
 	.close		   = l2tp_ip_close,
 	.bind		   = l2tp_ip_bind,
 	.connect	   = l2tp_ip_connect,
-	.disconnect	   = udp_disconnect,
+	.disconnect	   = l2tp_ip_disconnect,
 	.ioctl		   = udp_ioctl,
 	.destroy	   = l2tp_ip_destroy_sock,
 	.setsockopt	   = ip_setsockopt,

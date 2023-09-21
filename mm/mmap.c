@@ -6,6 +6,7 @@
  * Address space accounting code	<alan@lxorguk.ukuu.org.uk>
  */
 
+#include <linux/kernel.h>
 #include <linux/slab.h>
 #include <linux/backing-dev.h>
 #include <linux/mm.h>
@@ -30,6 +31,7 @@
 #include <linux/perf_event.h>
 #include <linux/audit.h>
 #include <linux/khugepaged.h>
+#include <linux/sched.h>
 
 #include <asm/uaccess.h>
 #include <asm/cacheflush.h>
@@ -45,6 +47,18 @@
 #ifndef arch_rebalance_pgtables
 #define arch_rebalance_pgtables(addr, len)		(addr)
 #endif
+
+#ifdef CONFIG_HAVE_ARCH_MMAP_RND_BITS
+const int mmap_rnd_bits_min = CONFIG_ARCH_MMAP_RND_BITS_MIN;
+const int mmap_rnd_bits_max = CONFIG_ARCH_MMAP_RND_BITS_MAX;
+int mmap_rnd_bits __read_mostly = CONFIG_ARCH_MMAP_RND_BITS;
+#endif
+#ifdef CONFIG_HAVE_ARCH_MMAP_RND_COMPAT_BITS
+const int mmap_rnd_compat_bits_min = CONFIG_ARCH_MMAP_RND_COMPAT_BITS_MIN;
+const int mmap_rnd_compat_bits_max = CONFIG_ARCH_MMAP_RND_COMPAT_BITS_MAX;
+int mmap_rnd_compat_bits __read_mostly = CONFIG_ARCH_MMAP_RND_COMPAT_BITS;
+#endif
+
 
 static void unmap_region(struct mm_struct *mm,
 		struct vm_area_struct *vma, struct vm_area_struct *prev,
@@ -111,7 +125,7 @@ struct percpu_counter vm_committed_as ____cacheline_aligned_in_smp;
  */
 int __vm_enough_memory(struct mm_struct *mm, long pages, int cap_sys_admin)
 {
-	unsigned long free, allowed;
+	long free, allowed;
 
 	vm_acct_memory(pages);
 
@@ -247,6 +261,7 @@ SYSCALL_DEFINE1(brk, unsigned long, brk)
 	unsigned long rlim, retval;
 	unsigned long newbrk, oldbrk;
 	struct mm_struct *mm = current->mm;
+	struct vm_area_struct *next;
 	unsigned long min_brk;
 
 	down_write(&mm->mmap_sem);
@@ -291,7 +306,8 @@ SYSCALL_DEFINE1(brk, unsigned long, brk)
 	}
 
 	/* Check against existing mmap mappings. */
-	if (find_vma_intersection(mm, oldbrk, newbrk+PAGE_SIZE))
+	next = find_vma(mm, oldbrk);
+	if (next && newbrk + PAGE_SIZE > vm_start_gap(next))
 		goto out;
 
 	/* Ok, looks good - let it rip. */
@@ -390,6 +406,34 @@ find_vma_prepare(struct mm_struct *mm, unsigned long addr,
 	*rb_link = __rb_link;
 	*rb_parent = __rb_parent;
 	return vma;
+}
+
+static unsigned long count_vma_pages_range(struct mm_struct *mm,
+		unsigned long addr, unsigned long end)
+{
+	unsigned long nr_pages = 0;
+	struct vm_area_struct *vma;
+
+	/* Find first overlaping mapping */
+	vma = find_vma_intersection(mm, addr, end);
+	if (!vma)
+		return 0;
+
+	nr_pages = (min(end, vma->vm_end) -
+		max(addr, vma->vm_start)) >> PAGE_SHIFT;
+
+	/* Iterate over the rest of the overlaps */
+	for (vma = vma->vm_next; vma; vma = vma->vm_next) {
+		unsigned long overlap_len;
+
+		if (vma->vm_start > end)
+			break;
+
+		overlap_len = min(end, vma->vm_end) - vma->vm_start;
+		nr_pages += overlap_len >> PAGE_SHIFT;
+	}
+
+	return nr_pages;
 }
 
 void __vma_link_rb(struct mm_struct *mm, struct vm_area_struct *vma,
@@ -538,9 +582,12 @@ again:			remove_next = 1 + (end > next->vm_end);
 		 * shrinking vma had, to cover any anon pages imported.
 		 */
 		if (exporter && exporter->anon_vma && !importer->anon_vma) {
-			if (anon_vma_clone(importer, exporter))
-				return -ENOMEM;
+			int error;
+
 			importer->anon_vma = exporter->anon_vma;
+			error = anon_vma_clone(importer, exporter);
+			if (error)
+				return error;
 		}
 	}
 
@@ -803,7 +850,7 @@ struct vm_area_struct *vma_merge(struct mm_struct *mm,
 				end, prev->vm_pgoff, NULL);
 		if (err)
 			return NULL;
-		khugepaged_enter_vma_merge(prev);
+		khugepaged_enter_vma_merge(prev, vm_flags);
 		return prev;
 	}
 
@@ -822,7 +869,7 @@ struct vm_area_struct *vma_merge(struct mm_struct *mm,
 				next->vm_pgoff - pglen, NULL);
 		if (err)
 			return NULL;
-		khugepaged_enter_vma_merge(area);
+		khugepaged_enter_vma_merge(area, vm_flags);
 		return area;
 	}
 
@@ -968,9 +1015,6 @@ static unsigned long do_mmap_pgoff(struct file *file, unsigned long addr,
 	vm_flags_t vm_flags;
 	int error;
 	unsigned long reqprot = prot;
-
-	if (file && (file->f_op->get_lower_file))
-		file = file->f_op->get_lower_file(file);
 
 	/*
 	 * Does the application expect PROT_READ to imply PROT_EXEC?
@@ -1139,15 +1183,19 @@ SYSCALL_DEFINE6(mmap_pgoff, unsigned long, addr, unsigned long, len,
 		file = fget(fd);
 		if (!file)
 			goto out;
+		if (is_file_hugepages(file))
+			len = ALIGN(len, huge_page_size(hstate_file(file)));
 	} else if (flags & MAP_HUGETLB) {
 		struct user_struct *user = NULL;
+
+		len = ALIGN(len, huge_page_size(&default_hstate));
 		/*
 		 * VM_NORESERVE is used because the reservations will be
 		 * taken when vm_ops->mmap() is called
 		 * A dummy user value is used because we are not locking
 		 * memory so no accounting is necessary
 		 */
-		file = hugetlb_file_setup(HUGETLB_ANON_FILE, addr, len,
+		file = hugetlb_file_setup(HUGETLB_ANON_FILE, len,
 						VM_NORESERVE, &user,
 						HUGETLB_ANONHUGE_INODE);
 		if (IS_ERR(file))
@@ -1250,6 +1298,23 @@ unsigned long mmap_region(struct file *file, unsigned long addr,
 	unsigned long charged = 0;
 	struct inode *inode =  file ? file->f_path.dentry->d_inode : NULL;
 
+	/* Check against address space limit. */
+	if (!may_expand_vm(mm, len >> PAGE_SHIFT)) {
+		unsigned long nr_pages;
+
+		/*
+		 * MAP_FIXED may remove pages of mappings that intersects with
+		 * requested mapping. Account for the pages it would unmap.
+		 */
+		if (!(vm_flags & MAP_FIXED))
+			return -ENOMEM;
+
+		nr_pages = count_vma_pages_range(mm, addr, addr + len);
+
+		if (!may_expand_vm(mm, (len >> PAGE_SHIFT) - nr_pages))
+			return -ENOMEM;
+	}
+
 	/* Clear old maps */
 	error = -ENOMEM;
 munmap_back:
@@ -1259,10 +1324,6 @@ munmap_back:
 			return -ENOMEM;
 		goto munmap_back;
 	}
-
-	/* Check against address space limit. */
-	if (!may_expand_vm(mm, len >> PAGE_SHIFT))
-		return -ENOMEM;
 
 	/*
 	 * Set 'VM_NORESERVE' if we should not account for the
@@ -1454,8 +1515,8 @@ arch_get_unmapped_area(struct file *filp, unsigned long addr,
 		unsigned long len, unsigned long pgoff, unsigned long flags)
 {
 	struct mm_struct *mm = current->mm;
-	struct vm_area_struct *vma;
-	unsigned long start_addr;
+	struct vm_area_struct *vma, *prev;
+	unsigned long start_addr, vm_start, prev_end;
 
 	if (len > TASK_SIZE)
 		return -ENOMEM;
@@ -1465,9 +1526,10 @@ arch_get_unmapped_area(struct file *filp, unsigned long addr,
 
 	if (addr) {
 		addr = PAGE_ALIGN(addr);
-		vma = find_vma(mm, addr);
+		vma = find_vma_prev(mm, addr, &prev);
 		if (TASK_SIZE - len >= addr &&
-		    (!vma || addr + len <= vma->vm_start))
+		    (!vma || addr + len <= vm_start_gap(vma)) &&
+		    (!prev || addr >= vm_end_gap(prev)))
 			return addr;
 	}
 	if (len > mm->cached_hole_size) {
@@ -1478,7 +1540,17 @@ arch_get_unmapped_area(struct file *filp, unsigned long addr,
 	}
 
 full_search:
-	for (vma = find_vma(mm, addr); ; vma = vma->vm_next) {
+	for (vma = find_vma_prev(mm, addr, &prev); ; prev = vma,
+						vma = vma->vm_next) {
+		if (prev) {
+			prev_end = vm_end_gap(prev);
+			if (addr < prev_end) {
+				addr = prev_end;
+				/* If vma already violates gap, forget it */
+				if (vma && addr > vma->vm_start)
+					addr = vma->vm_start;
+			}
+		}
 		/* At this point:  (!vma || addr < vma->vm_end). */
 		if (TASK_SIZE - len < addr) {
 			/*
@@ -1493,16 +1565,16 @@ full_search:
 			}
 			return -ENOMEM;
 		}
-		if (!vma || addr + len <= vma->vm_start) {
+		vm_start = vma ? vm_start_gap(vma) : TASK_SIZE;
+		if (addr + len <= vm_start) {
 			/*
 			 * Remember the place where we stopped the search:
 			 */
 			mm->free_area_cache = addr + len;
 			return addr;
 		}
-		if (addr + mm->cached_hole_size < vma->vm_start)
-		        mm->cached_hole_size = vma->vm_start - addr;
-		addr = vma->vm_end;
+		if (addr + mm->cached_hole_size < vm_start)
+			mm->cached_hole_size = vm_start - addr;
 	}
 }
 #endif	
@@ -1526,9 +1598,10 @@ arch_get_unmapped_area_topdown(struct file *filp, const unsigned long addr0,
 			  const unsigned long len, const unsigned long pgoff,
 			  const unsigned long flags)
 {
-	struct vm_area_struct *vma;
+	struct vm_area_struct *vma, *prev;
 	struct mm_struct *mm = current->mm;
 	unsigned long addr = addr0, start_addr;
+	unsigned long vm_start, prev_end;
 
 	/* requested length too big for entire address space */
 	if (len > TASK_SIZE)
@@ -1540,9 +1613,10 @@ arch_get_unmapped_area_topdown(struct file *filp, const unsigned long addr0,
 	/* requesting a specific address */
 	if (addr) {
 		addr = PAGE_ALIGN(addr);
-		vma = find_vma(mm, addr);
+		vma = find_vma_prev(mm, addr, &prev);
 		if (TASK_SIZE - len >= addr &&
-				(!vma || addr + len <= vma->vm_start))
+				(!vma || addr + len <= vm_start_gap(vma)) &&
+				(!prev || addr >= vm_end_gap(prev)))
 			return addr;
 	}
 
@@ -1566,18 +1640,21 @@ try_again:
 		 * else if new region fits below vma->vm_start,
 		 * return with success:
 		 */
-		vma = find_vma(mm, addr);
-		if (!vma || addr+len <= vma->vm_start)
+		vma = find_vma_prev(mm, addr, &prev);
+		vm_start = vma ? vm_start_gap(vma) : mm->mmap_base;
+		prev_end = vm_end_gap(prev);
+
+		if (addr + len <= vm_start && addr >= prev_end)
 			/* remember the address as a hint for next time */
 			return (mm->free_area_cache = addr);
 
  		/* remember the largest hole we saw so far */
- 		if (addr + mm->cached_hole_size < vma->vm_start)
- 		        mm->cached_hole_size = vma->vm_start - addr;
-
+		if (addr + mm->cached_hole_size < vm_start)
+			mm->cached_hole_size = vm_start - addr;
+ 
 		/* try just below the current vma->vm_start */
-		addr = vma->vm_start-len;
-	} while (len < vma->vm_start);
+		addr = vm_start - len;
+	} while (len < vm_start);
 
 fail:
 	/*
@@ -1666,7 +1743,7 @@ struct vm_area_struct *find_vma(struct mm_struct *mm, unsigned long addr)
 	if (mm) {
 		/* Check the cache first. */
 		/* (Cache hit rate is typically around 35%.) */
-		vma = mm->mmap_cache;
+		vma = ACCESS_ONCE(mm->mmap_cache);
 		if (!(vma && vma->vm_end > addr && vma->vm_start <= addr)) {
 			struct rb_node * rb_node;
 
@@ -1728,14 +1805,17 @@ static int acct_stack_growth(struct vm_area_struct *vma, unsigned long size, uns
 {
 	struct mm_struct *mm = vma->vm_mm;
 	struct rlimit *rlim = current->signal->rlim;
-	unsigned long new_start;
+	unsigned long new_start, actual_size;
 
 	/* address space limit tests */
 	if (!may_expand_vm(mm, grow))
 		return -ENOMEM;
 
 	/* Stack limit test */
-	if (size > ACCESS_ONCE(rlim[RLIMIT_STACK].rlim_cur))
+	actual_size = size;
+	if (size && (vma->vm_flags & (VM_GROWSUP | VM_GROWSDOWN)))
+		actual_size -= PAGE_SIZE;
+	if (actual_size > ACCESS_ONCE(rlim[RLIMIT_STACK].rlim_cur))
 		return -ENOMEM;
 
 	/* mlock limit tests */
@@ -1777,7 +1857,9 @@ static int acct_stack_growth(struct vm_area_struct *vma, unsigned long size, uns
  */
 int expand_upwards(struct vm_area_struct *vma, unsigned long address)
 {
-	int error;
+	struct vm_area_struct *next;
+	unsigned long gap_addr;
+	int error = 0;
 
 	if (!(vma->vm_flags & VM_GROWSUP))
 		return -EFAULT;
@@ -1786,23 +1868,36 @@ int expand_upwards(struct vm_area_struct *vma, unsigned long address)
 	 * We must make sure the anon_vma is allocated
 	 * so that the anon_vma locking is not a noop.
 	 */
+	/* Guard against exceeding limits of the address space. */
+	address &= PAGE_MASK;
+	if (address >= TASK_SIZE)
+		return -ENOMEM;
+	address += PAGE_SIZE;
+
+	/* Enforce stack_guard_gap */
+	gap_addr = address + stack_guard_gap;
+
+	/* Guard against overflow */
+	if (gap_addr < address || gap_addr > TASK_SIZE)
+		gap_addr = TASK_SIZE;
+
+	next = vma->vm_next;
+	if (next && next->vm_start < gap_addr) {
+		if (!(next->vm_flags & VM_GROWSUP))
+			return -ENOMEM;
+		/* Check that both stack segments have the same anon_vma? */
+	}
+
+	/* We must make sure the anon_vma is allocated. */
 	if (unlikely(anon_vma_prepare(vma)))
 		return -ENOMEM;
-	vma_lock_anon_vma(vma);
 
 	/*
 	 * vma->vm_start/vm_end cannot change under us because the caller
 	 * is required to hold the mmap_sem in read mode.  We need the
 	 * anon_vma lock to serialize against concurrent expand_stacks.
-	 * Also guard against wrapping around to address 0.
 	 */
-	if (address < PAGE_ALIGN(address+4))
-		address = PAGE_ALIGN(address+4);
-	else {
-		vma_unlock_anon_vma(vma);
-		return -ENOMEM;
-	}
-	error = 0;
+	vma_lock_anon_vma(vma);
 
 	/* Somebody else might have raced and expanded it already */
 	if (address > vma->vm_end) {
@@ -1821,7 +1916,7 @@ int expand_upwards(struct vm_area_struct *vma, unsigned long address)
 		}
 	}
 	vma_unlock_anon_vma(vma);
-	khugepaged_enter_vma_merge(vma);
+	khugepaged_enter_vma_merge(vma, vma->vm_flags);
 	return error;
 }
 #endif /* CONFIG_STACK_GROWSUP || CONFIG_IA64 */
@@ -1832,27 +1927,36 @@ int expand_upwards(struct vm_area_struct *vma, unsigned long address)
 int expand_downwards(struct vm_area_struct *vma,
 				   unsigned long address)
 {
+	struct vm_area_struct *prev;
+	unsigned long gap_addr;
 	int error;
-
-	/*
-	 * We must make sure the anon_vma is allocated
-	 * so that the anon_vma locking is not a noop.
-	 */
-	if (unlikely(anon_vma_prepare(vma)))
-		return -ENOMEM;
 
 	address &= PAGE_MASK;
 	error = security_file_mmap(NULL, 0, 0, 0, address, 1);
 	if (error)
 		return error;
 
-	vma_lock_anon_vma(vma);
+	/* Enforce stack_guard_gap */
+	gap_addr = address - stack_guard_gap;
+	if (gap_addr > address)
+		return -ENOMEM;
+	prev = vma->vm_prev;
+	if (prev && prev->vm_end > gap_addr) {
+		if (!(prev->vm_flags & VM_GROWSDOWN))
+			return -ENOMEM;
+		/* Check that both stack segments have the same anon_vma? */
+	}
+
+	/* We must make sure the anon_vma is allocated. */
+	if (unlikely(anon_vma_prepare(vma)))
+		return -ENOMEM;
 
 	/*
 	 * vma->vm_start/vm_end cannot change under us because the caller
 	 * is required to hold the mmap_sem in read mode.  We need the
 	 * anon_vma lock to serialize against concurrent expand_stacks.
 	 */
+	vma_lock_anon_vma(vma);
 
 	/* Somebody else might have raced and expanded it already */
 	if (address < vma->vm_start) {
@@ -1872,13 +1976,48 @@ int expand_downwards(struct vm_area_struct *vma,
 		}
 	}
 	vma_unlock_anon_vma(vma);
-	khugepaged_enter_vma_merge(vma);
+	khugepaged_enter_vma_merge(vma, vma->vm_flags);
 	return error;
 }
 
+/* enforced gap between the expanding stack and other mappings. */
+unsigned long stack_guard_gap = 256UL<<PAGE_SHIFT;
+
+static int __init cmdline_parse_stack_guard_gap(char *p)
+{
+	unsigned long val;
+	char *endptr;
+
+	val = simple_strtoul(p, &endptr, 10);
+	if (!*endptr)
+		stack_guard_gap = val << PAGE_SHIFT;
+
+	return 0;
+}
+__setup("stack_guard_gap=", cmdline_parse_stack_guard_gap);
+
+/*
+ * Note how expand_stack() refuses to expand the stack all the way to
+ * abut the next virtual mapping, *unless* that mapping itself is also
+ * a stack mapping. We want to leave room for a guard page, after all
+ * (the guard page itself is not added here, that is done by the
+ * actual page faulting logic)
+ *
+ * This matches the behavior of the guard page logic (see mm/memory.c:
+ * check_stack_guard_page()), which only allows the guard page to be
+ * removed under these circumstances.
+ */
 #ifdef CONFIG_STACK_GROWSUP
 int expand_stack(struct vm_area_struct *vma, unsigned long address)
 {
+	struct vm_area_struct *next;
+
+	address &= PAGE_MASK;
+	next = vma->vm_next;
+	if (next && next->vm_start == address + PAGE_SIZE) {
+		if (!(next->vm_flags & VM_GROWSUP))
+			return -ENOMEM;
+	}
 	return expand_upwards(vma, address);
 }
 
@@ -1891,7 +2030,8 @@ find_extend_vma(struct mm_struct *mm, unsigned long addr)
 	vma = find_vma_prev(mm, addr, &prev);
 	if (vma && (vma->vm_start <= addr))
 		return vma;
-	if (!prev || expand_stack(prev, addr))
+	/* don't alter vm_end if the coredump is running */
+	if (!prev || !mmget_still_valid(mm) || expand_stack(prev, addr))
 		return NULL;
 	if (prev->vm_flags & VM_LOCKED) {
 		mlock_vma_pages_range(prev, addr, prev->vm_end);
@@ -1901,6 +2041,14 @@ find_extend_vma(struct mm_struct *mm, unsigned long addr)
 #else
 int expand_stack(struct vm_area_struct *vma, unsigned long address)
 {
+	struct vm_area_struct *prev;
+
+	address &= PAGE_MASK;
+	prev = vma->vm_prev;
+	if (prev && prev->vm_end == address) {
+		if (!(prev->vm_flags & VM_GROWSDOWN))
+			return -ENOMEM;
+	}
 	return expand_downwards(vma, address);
 }
 
@@ -1917,6 +2065,9 @@ find_extend_vma(struct mm_struct * mm, unsigned long addr)
 	if (vma->vm_start <= addr)
 		return vma;
 	if (!(vma->vm_flags & VM_GROWSDOWN))
+		return NULL;
+	/* don't alter vm_start if the coredump is running */
+	if (!mmget_still_valid(mm))
 		return NULL;
 	start = vma->vm_start;
 	if (expand_stack(vma, addr))
@@ -1967,7 +2118,7 @@ static void unmap_region(struct mm_struct *mm,
 	unmap_vmas(&tlb, vma, start, end, &nr_accounted, NULL);
 	vm_unacct_memory(nr_accounted);
 	free_pgtables(&tlb, vma, prev ? prev->vm_end : FIRST_USER_ADDRESS,
-				 next ? next->vm_start : 0);
+				 next ? next->vm_start : USER_PGTABLES_CEILING);
 	tlb_finish_mmu(&tlb, start, end);
 }
 
@@ -2355,7 +2506,7 @@ void exit_mmap(struct mm_struct *mm)
 	unmap_vmas(&tlb, vma, 0, -1, &nr_accounted, NULL);
 	vm_unacct_memory(nr_accounted);
 
-	free_pgtables(&tlb, vma, FIRST_USER_ADDRESS, 0);
+	free_pgtables(&tlb, vma, FIRST_USER_ADDRESS, USER_PGTABLES_CEILING);
 	tlb_finish_mmu(&tlb, 0, -1);
 
 	/*

@@ -405,10 +405,10 @@ static ssize_t adu_read(struct file *file, __user char *buffer, size_t count,
 	unsigned long flags;
 	DECLARE_WAITQUEUE(wait, current);
 
-	dbg(2," %s : enter, count = %Zd, file=%p", __func__, count, file);
+	dbg(2," %s : enter, count = %Zd, file=%pK", __func__, count, file);
 
 	dev = file->private_data;
-	dbg(2," %s : dev=%p", __func__, dev);
+	dbg(2," %s : dev=%pK", __func__, dev);
 
 	if (mutex_lock_interruptible(&dev->mtx))
 		return -ERESTARTSYS;
@@ -829,10 +829,10 @@ static int adu_probe(struct usb_interface *interface,
 
 	/* let the user know what node this device is now attached to */
 	dev_info(&interface->dev, "ADU%d %s now attached to /dev/usb/adutux%d\n",
-		 udev->descriptor.idProduct, dev->serial_number,
+		 le16_to_cpu(udev->descriptor.idProduct), dev->serial_number,
 		 (dev->minor - ADU_MINOR_BASE));
 exit:
-	dbg(2," %s : leave, return value %p (dev)", __func__, dev);
+	dbg(2," %s : leave, return value %pK (dev)", __func__, dev);
 
 	return retval;
 

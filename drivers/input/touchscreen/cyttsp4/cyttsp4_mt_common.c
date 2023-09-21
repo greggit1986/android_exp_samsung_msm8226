@@ -467,7 +467,7 @@ static void cyttsp4_mt_close(struct input_dev *input)
 {
 	struct device *dev = input->dev.parent;
 	struct cyttsp4_core_data *cd = dev_get_drvdata(dev);
-//	struct cyttsp4_mt_data *md = &cd->md;
+	struct cyttsp4_mt_data *md = &cd->md;
 	dev_info(dev, "%s\n", __func__);
 
 #if defined(TSP_BOOSTER)

@@ -59,6 +59,8 @@
 #define MAX_FINGERS		10
 #define MAX_WIDTH		30
 #define MAX_PRESSURE		255
+#define MAX_ANGLE		90
+#define MIN_ANGLE		-90
 
 /* Registers */
 #define MMS_MODE_CONTROL	0x01
@@ -815,10 +817,10 @@ static irqreturn_t mms_ts_interrupt(int irq, void *dev_id)
 
 		if ((tmp[0] & 0x80) == 0) {
 #if defined(SEC_TSP_DEBUG)
-			/* dev_dbg(&client->dev,
+			dev_dbg(&client->dev,
 				"finger id[%d]: x=%d y=%d p=%d w=%d major=%d minor=%d angle=%d palm=%d\n"
 				, id, x, y, tmp[5], tmp[4], tmp[6], tmp[7]
-				, angle, palm); */
+				, angle, palm);
 #else
 			dev_notice(&client->dev, "finger [%d] up\n", id);
 #endif
@@ -847,6 +849,7 @@ static irqreturn_t mms_ts_interrupt(int irq, void *dev_id)
 #endif
 		input_report_abs(info->input_dev, ABS_MT_TOUCH_MAJOR, tmp[6]);
 		input_report_abs(info->input_dev, ABS_MT_TOUCH_MINOR, tmp[7]);
+		input_report_abs(info->input_dev, ABS_MT_ANGLE, angle);
 		input_report_abs(info->input_dev, ABS_MT_PALM, palm);
 #if defined(SEC_TSP_DEBUG)
 		if (info->finger_state[id] == 0) {
@@ -1393,7 +1396,7 @@ int mms100_ISC_download_mbinary(struct mms_ts_info *info)
 
 	pr_info("[TSP ISC] %s\n", __func__);
 
-	mms_pwr_on_reset(info);
+	mms100_reset(info);
 /*
 	ret_msg = mms100_check_operating_mode(_client, EC_BOOT_ON_SUCCEEDED);
 	if (ret_msg != ISC_SUCCESS)
@@ -2957,6 +2960,10 @@ static ssize_t store_cmd(struct device *dev, struct device_attribute
 	bool cmd_found = false;
 	int param_cnt = 0;
 
+	if (strlen(buf) >= TSP_CMD_STR_LEN) {
+		dev_err(&info->client->dev, "%s: cmd length is over(%s,%d)!!\n", __func__, buf, (int)strlen(buf));
+		return -EINVAL;
+	}
 
 	if (info->cmd_is_running == true) {
 		dev_err(&info->client->dev, "tsp_cmd: other cmd is running.\n");
@@ -3020,7 +3027,7 @@ static ssize_t store_cmd(struct device *dev, struct device_attribute
 				param_cnt++;
 			}
 			cur++;
-		} while (cur - buf <= len);
+		} while ((cur - buf <= len) && (param_cnt < TSP_CMD_PARAM_NUM));
 	}
 
 	dev_info(&client->dev, "cmd = %s\n", tsp_cmd_ptr->cmd_name);
@@ -3347,7 +3354,7 @@ int __devinit mms_ts_probe(struct i2c_client *client,
 	if (!pdata)
 		return -EINVAL;
 
-
+	melfas_request_gpio(pdata);
 #endif
 	info = kzalloc(sizeof(struct mms_ts_info), GFP_KERNEL);
 	if (!info) {
@@ -3387,11 +3394,10 @@ int __devinit mms_ts_probe(struct i2c_client *client,
 		info->max_x = 720;
 		info->max_y = 1280;
 	}
-	i2c_set_clientdata(client, info);
+
 	melfas_vdd_on(info, 1);
 	msleep(100);
-	melfas_request_gpio(pdata);
-
+	i2c_set_clientdata(client, info);
 
 	info->callbacks.inform_charger = melfas_ta_cb;
 	if (info->register_cb)
@@ -3417,6 +3423,8 @@ int __devinit mms_ts_probe(struct i2c_client *client,
 				0, MAX_PRESSURE, 0, 0);
 	input_set_abs_params(info->input_dev, ABS_MT_TOUCH_MINOR,
 				0, MAX_PRESSURE, 0, 0);
+	input_set_abs_params(input_dev, ABS_MT_ANGLE,
+				MIN_ANGLE, MAX_ANGLE, 0, 0);
 	input_set_abs_params(input_dev, ABS_MT_PALM,
 				0, 1, 0, 0);
 	input_set_drvdata(input_dev, info);

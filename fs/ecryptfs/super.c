@@ -33,9 +33,6 @@
 #include <linux/statfs.h>
 #include <linux/magic.h>
 #include "ecryptfs_kernel.h"
-#ifdef CONFIG_SDP
-#include "ecryptfs_dek.h"
-#endif
 
 struct kmem_cache *ecryptfs_inode_info_cache;
 
@@ -63,11 +60,6 @@ static struct inode *ecryptfs_alloc_inode(struct super_block *sb)
 	mutex_init(&inode_info->lower_file_mutex);
 	atomic_set(&inode_info->lower_file_count, 0);
 	inode_info->lower_file = NULL;
-#ifdef CONFIG_SDP
-	// get userid from super block
-	inode_info->userid = ecryptfs_super_block_get_userid(sb);
-	inode_info->crypt_stat.userid = inode_info->userid;
-#endif
 	inode = &inode_info->vfs_inode;
 out:
 	return inode;
@@ -156,6 +148,8 @@ static int ecryptfs_show_options(struct seq_file *m, struct dentry *root)
 	struct super_block *sb = root->d_sb;
 	struct ecryptfs_mount_crypt_stat *mount_crypt_stat =
 		&ecryptfs_superblock_to_private(sb)->mount_crypt_stat;
+	struct ecryptfs_propagate_stat *propagate_stat =
+		&ecryptfs_superblock_to_private(sb)->propagate_stat;
 	struct ecryptfs_global_auth_tok *walker;
 
 	mutex_lock(&mount_crypt_stat->global_auth_tok_list_mutex);
@@ -167,14 +161,6 @@ static int ecryptfs_show_options(struct seq_file *m, struct dentry *root)
 		else
 			seq_printf(m, ",ecryptfs_sig=%s", walker->sig);
 	}
-#ifdef CONFIG_SDP
-	if(ecryptfs_is_valid_userid(mount_crypt_stat->userid)){
-		seq_printf(m, ",userid=%d", mount_crypt_stat->userid);
-	}
-	if (mount_crypt_stat->flags & ECRYPTFS_MOUNT_SDP_ENABLED){
-		seq_printf(m, ",sdp_enabled");
-	}
-#endif
 	mutex_unlock(&mount_crypt_stat->global_auth_tok_list_mutex);
 
 	seq_printf(m, ",ecryptfs_cipher=%s",
@@ -202,20 +188,73 @@ static int ecryptfs_show_options(struct seq_file *m, struct dentry *root)
 	if (mount_crypt_stat->flags & ECRYPTFS_GLOBAL_MOUNT_AUTH_TOK_ONLY)
 		seq_printf(m, ",ecryptfs_mount_auth_tok_only");
 
+	seq_printf(m, ",base=%s", propagate_stat->base_path);
+	if (propagate_stat->propagate_type == TYPE_E_DEFAULT)
+		seq_printf(m, ",type=default");
+	else if (propagate_stat->propagate_type == TYPE_E_READ)
+		seq_printf(m, ",type=read");
+	else if (propagate_stat->propagate_type == TYPE_E_WRITE)
+		seq_printf(m, ",type=write");
+	seq_printf(m, ",label=%s", propagate_stat->label);	
+
 	return 0;
 }
-#ifdef CONFIG_SDP
-static int ecryptfs_drop_inode(struct inode *inode) {
-	struct ecryptfs_crypt_stat *crypt_stat =
-		    &ecryptfs_inode_to_private(inode)->crypt_stat;
 
-	if (crypt_stat->flags & ECRYPTFS_DEK_IS_SENSITIVE) {
-		ecryptfs_printk(KERN_INFO, "dropping sensitive inode\n");
-		return 1;
+static long ecryptfs_propagate_lookup(struct super_block *sb, char *pathname){
+	int ret = 0;
+	char *propagate_path;
+	struct ecryptfs_sb_info *sbi;
+	struct ecryptfs_propagate_stat *stat;
+	struct path sibling_path;
+	const struct cred *saved_cred = NULL;
+
+	sbi = ecryptfs_superblock_to_private(sb);
+	stat = &sbi->propagate_stat;
+	ECRYPTFS_OVERRIDE_ROOT_CRED(saved_cred);
+	propagate_path = kmalloc(PATH_MAX, GFP_KERNEL);
+	if (!propagate_path) {
+		ECRYPTFS_REVERT_CRED(saved_cred);
+		return -ENOMEM;
 	}
-	return generic_drop_inode(inode);
+	if (stat->propagate_type != TYPE_E_NONE && stat->propagate_type != TYPE_E_DEFAULT) {
+		snprintf(propagate_path, PATH_MAX, "%s/%s/%s/%s",
+				stat->base_path, "default", stat->label, pathname);
+		ret = (long)kern_path(propagate_path, LOOKUP_FOLLOW, &sibling_path);
+		if (!ret) {
+			path_put(&sibling_path);
+		}
+	}
+
+	if (stat->propagate_type != TYPE_E_NONE && stat->propagate_type != TYPE_E_READ) {
+		snprintf(propagate_path, PATH_MAX, "%s/%s/%s/%s",
+				stat->base_path, "read", stat->label, pathname);
+		ret = (long)kern_path(propagate_path, LOOKUP_FOLLOW, &sibling_path);
+		if (!ret) {
+			path_put(&sibling_path);
+		}
+	}
+
+	if (stat->propagate_type != TYPE_E_NONE && stat->propagate_type != TYPE_E_WRITE) {
+		snprintf(propagate_path, PATH_MAX, "%s/%s/%s/%s",
+				stat->base_path, "write", stat->label, pathname);
+		ret = (long)kern_path(propagate_path, LOOKUP_FOLLOW, &sibling_path);
+		if (!ret) {
+			path_put(&sibling_path);
+		}
+	}
+
+	if (stat->propagate_type != TYPE_E_NONE) {
+		snprintf(propagate_path, PATH_MAX, "/storage/%s/%s",
+				stat->label, pathname);
+		ret = (long)kern_path(propagate_path, LOOKUP_FOLLOW, &sibling_path);
+		if (!ret) {
+			path_put(&sibling_path);
+		}
+	}
+	ECRYPTFS_REVERT_CRED(saved_cred);
+	kfree(propagate_path);
+	return ret;
 }
-#endif
 
 const struct super_operations ecryptfs_sops = {
 	.alloc_inode = ecryptfs_alloc_inode,
@@ -224,7 +263,16 @@ const struct super_operations ecryptfs_sops = {
 	.remount_fs = NULL,
 	.evict_inode = ecryptfs_evict_inode,
 	.show_options = ecryptfs_show_options,
-#ifdef CONFIG_SDP
-	.drop_inode = ecryptfs_drop_inode,
-#endif
+	.drop_inode = generic_delete_inode,
+};
+
+const struct super_operations ecryptfs_multimount_sops = {
+	.alloc_inode = ecryptfs_alloc_inode,
+	.destroy_inode = ecryptfs_destroy_inode,
+	.statfs = ecryptfs_statfs,
+	.remount_fs = NULL,
+	.evict_inode = ecryptfs_evict_inode,
+	.show_options = ecryptfs_show_options,
+	.drop_inode = generic_delete_inode,
+	.unlink_callback = ecryptfs_propagate_lookup,
 };

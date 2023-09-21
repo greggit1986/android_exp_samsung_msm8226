@@ -64,6 +64,9 @@ static struct sec_mhl_cable support_cable_list[] = {
 	{ .cable_type = EXTCON_MHL, },
 	{ .cable_type = EXTCON_MHL_VB, },
 	{ .cable_type = EXTCON_SMARTDOCK, },
+#ifdef CONFIG_MUIC_SUPPORT_MULTIMEDIA_DOCK
+	{ .cable_type = EXTCON_MULTIMEDIADOCK, },
+#endif
 };
 #endif
 
@@ -3316,6 +3319,15 @@ static int sii8240_mhl_onoff(unsigned long event)
 	struct sii8240_data *sii8240 = dev_get_drvdata(sii8240_mhldev);
 	int handled = MHL_CON_UNHANDLED;
 
+#ifdef CONFIG_MUIC_SUPPORT_MULTIMEDIA_DOCK
+	pr_info("sii8240_mhl_onoff mmdock debug_log event =  %lu\n", event);
+	if (event == 2)	{
+		pr_info("sii8240: mmdock connection\n");
+		sii8240->pdata->is_multimediadock = true;
+		event = 1;
+	}
+#endif
+
 	if (event == sii8240->muic_state) {
 		pr_info("sii8240 : Same muic event, Ignored!\n");
 		return MHL_CON_UNHANDLED;
@@ -3328,10 +3340,12 @@ static int sii8240_mhl_onoff(unsigned long event)
 		pr_info("sii8240:detection started\n");
 		wake_lock(&sii8240->mhl_wake_lock);
 		sii8240->mhl_connected = true;
+		sii8240->pdata->mhl_connected = true;
 		sii8240->muic_state = MHL_ATTACHED;
 		sii8240->cbus_ready = 0;
 	} else {
 		pr_info("sii8240:disconnection\n");
+		sii8240->pdata->mhl_connected = false;
 		/* Charging stop when MHL detach */
 		if (sii8240->pdata->charger_mhl_cb)
 			sii8240->pdata->charger_mhl_cb(false, -1);
@@ -3339,7 +3353,9 @@ static int sii8240_mhl_onoff(unsigned long event)
 		sii8240->muic_state = MHL_DETACHED;
 		wake_unlock(&sii8240->mhl_wake_lock);
 		mutex_lock(&sii8240->lock);
-
+#ifdef CONFIG_MUIC_SUPPORT_MULTIMEDIA_DOCK
+		sii8240->pdata->is_multimediadock = false;
+#endif
 		if (sii8240->pdata->hdmi_mhl_ops) {
 			struct msm_hdmi_mhl_ops *hdmi_mhl_ops =	sii8240->pdata->hdmi_mhl_ops;
 			hdmi_mhl_ops->set_upstream_hpd(sii8240->pdata->hdmi_pdev, 0);
@@ -3447,6 +3463,13 @@ static int sii8240_extcon_notifier(struct notifier_block *self,
 		cable->cable_state = event;
 		sii8240->pdata->is_smartdock = true;
 		schedule_work(&cable->work);
+#ifdef CONFIG_MUIC_SUPPORT_MULTIMEDIA_DOCK
+	} else if (cable->cable_type == EXTCON_MULTIMEDIADOCK) {
+		cable->cable_state = event;
+		if (event == MHL_ATTACHED)
+			sii8240->pdata->is_multimediadock = true;
+		schedule_work(&cable->work);
+#endif
 	}
 	return NOTIFY_DONE;
 }
@@ -4460,8 +4483,11 @@ static irqreturn_t sii8240_irq_thread(int irq, void *data)
 				}
 			}
 		if (sii8240->state == STATE_MHL_CONNECTED) {
-			if (sii8240->pdata->charger_mhl_cb)
-				sii8240->pdata->charger_mhl_cb(true, 0x03);
+			pr_info("%s mhl_connected(%d)\n", __func__, sii8240->pdata->mhl_connected);
+			if (sii8240->pdata->mhl_connected) {
+				if (sii8240->pdata->charger_mhl_cb)
+					sii8240->pdata->charger_mhl_cb(true, 0x03);
+			}
 			ret = sii8240_init_regs(sii8240);
 			if (unlikely(ret < 0)) {
 				pr_err("[ERROR] %s() sii8240_init_regs\n", __func__);

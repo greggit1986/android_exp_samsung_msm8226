@@ -1,4 +1,4 @@
-/* Copyright (c) 2008-2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2008-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -95,6 +95,7 @@ struct disp_info_notify {
 	int value;
 	int is_suspend;
 	int ref_count;
+	bool init_done;
 };
 
 struct msm_sync_pt_data {
@@ -136,9 +137,9 @@ struct msm_mdp_interface {
 	int (*lut_update)(struct msm_fb_data_type *mfd, struct fb_cmap *cmap);
 	int (*do_histogram)(struct msm_fb_data_type *mfd,
 				struct mdp_histogram *hist);
-	int (*ad_invalidate_input)(struct msm_fb_data_type *mfd);
 	int (*ad_calc_bl)(struct msm_fb_data_type *mfd, int bl_in,
-		int *bl_out, int *ad_bl_out);
+		int *bl_out, bool *bl_out_notify);
+	int (*ad_shutdown_cleanup)(struct msm_fb_data_type *mfd);
 	int (*panel_register_done)(struct mdss_panel_data *pdata);
 	u32 (*fb_stride)(u32 fb_index, u32 xres, int bpp);
 	int (*splash_init_fnc)(struct msm_fb_data_type *mfd);
@@ -284,13 +285,8 @@ static inline void mdss_fb_update_notify_update(struct msm_fb_data_type *mfd)
 	}
 }
 #ifdef CONFIG_FB_MSM_CAMERA_CSC
-#if defined(CONFIG_SEC_KS01_PROJECT)|| defined(CONFIG_SEC_ATLANTIC_PROJECT)
-extern u8 prev_csc_update;
-#endif
 extern u8 csc_update;
-#if !defined(CONFIG_SEC_KS01_PROJECT) && !defined(CONFIG_SEC_ATLANTIC_PROJECT)
-extern u8 pre_csc_update;
-#endif
+extern u8 csc_change;
 #endif
 
 #if defined (CONFIG_FB_MSM_MDSS_DBG_SEQ_TICK)

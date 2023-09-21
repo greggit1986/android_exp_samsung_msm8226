@@ -34,6 +34,11 @@ struct route_info {
 #define RT6_LOOKUP_F_SRCPREF_PUBLIC	0x00000010
 #define RT6_LOOKUP_F_SRCPREF_COA	0x00000020
 
+/* We do not (yet ?) support IPv6 jumbograms (RFC 2675)
+ * Unlike IPv4, hdr->seg_len doesn't include the IPv6 header
+ */
+#define IP6_MAX_MTU (0xFFFF + sizeof(struct ipv6hdr))
+
 /*
  * rt6_srcprefs2flags() and rt6_flags2srcprefs() translate
  * between IPV6_ADDR_PREFERENCES socket option values
@@ -131,10 +136,10 @@ extern void			rt6_redirect(const struct in6_addr *dest,
 					     u8 *lladdr,
 					     int on_link);
 
-extern void			rt6_pmtu_discovery(const struct in6_addr *daddr,
-						   const struct in6_addr *saddr,
-						   struct net_device *dev,
-						   u32 pmtu);
+extern void ip6_update_pmtu(struct sk_buff *skb, struct net *net, __be32 mtu,
+			    int oif, u32 mark, kuid_t uid);
+extern void ip6_sk_update_pmtu(struct sk_buff *skb, struct sock *sk,
+			       __be32 mtu);
 
 struct netlink_callback;
 

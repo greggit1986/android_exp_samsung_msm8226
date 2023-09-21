@@ -366,7 +366,7 @@ struct dst_entry *inet_csk_route_req(struct sock *sk,
 			   sk->sk_protocol, inet_sk_flowi_flags(sk),
 			   (opt && opt->opt.srr) ? opt->opt.faddr : ireq->rmt_addr,
 			   ireq->loc_addr, ireq->rmt_port, inet_sk(sk)->inet_sport,
-			   sock_i_uid(sk));
+			   sk->sk_uid);
 	security_req_classify_flow(req, flowi4_to_flowi(fl4));
 	rt = ip_route_output_flow(net, fl4, sk);
 	if (IS_ERR(rt))
@@ -400,7 +400,7 @@ struct dst_entry *inet_csk_route_child_sock(struct sock *sk,
 			   sk->sk_protocol, inet_sk_flowi_flags(sk),
 			   (opt && opt->opt.srr) ? opt->opt.faddr : ireq->rmt_addr,
 			   ireq->loc_addr, ireq->rmt_port, inet_sk(sk)->inet_sport,
-			   sock_i_uid(sk));
+			   sk->sk_uid);
 	security_req_classify_flow(req, flowi4_to_flowi(fl4));
 	rt = ip_route_output_flow(net, fl4, sk);
 	if (IS_ERR(rt))
@@ -616,7 +616,11 @@ struct sock *inet_csk_clone_lock(const struct sock *sk,
 		inet_sk(newsk)->inet_dport = inet_rsk(req)->rmt_port;
 		inet_sk(newsk)->inet_num = ntohs(inet_rsk(req)->loc_port);
 		inet_sk(newsk)->inet_sport = inet_rsk(req)->loc_port;
+		inet_sk(newsk)->mc_list = NULL;
+		
 		newsk->sk_write_space = sk_stream_write_space;
+
+		inet_sk(newsk)->mc_list = NULL;
 
 		newsk->sk_mark = inet_rsk(req)->ir_mark;
 
@@ -662,6 +666,22 @@ void inet_csk_destroy_sock(struct sock *sk)
 	sock_put(sk);
 }
 EXPORT_SYMBOL(inet_csk_destroy_sock);
+
+/* This function allows to force a closure of a socket after the call to
+ * tcp/dccp_create_openreq_child().
+ */
+void inet_csk_prepare_forced_close(struct sock *sk)
+{
+	/* sk_clone_lock locked the socket and set refcnt to 2 */
+	bh_unlock_sock(sk);
+	sock_put(sk);
+
+	/* The below has to be done to allow calling inet_csk_destroy_sock */
+	sock_set_flag(sk, SOCK_DEAD);
+	percpu_counter_inc(sk->sk_prot->orphan_count);
+	inet_sk(sk)->inet_num = 0;
+}
+EXPORT_SYMBOL(inet_csk_prepare_forced_close);
 
 int inet_csk_listen_start(struct sock *sk, const int nr_table_entries)
 {

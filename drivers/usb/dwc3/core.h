@@ -621,6 +621,14 @@ struct dwc3_hwparams {
 /* HWPARAMS1 */
 #define DWC3_NUM_INT(n)		(((n) & (0x3f << 15)) >> 15)
 
+/* HWPARAMS3 */
+#define DWC3_NUM_IN_EPS_MASK	(0x1f << 18)
+#define DWC3_NUM_EPS_MASK	(0x3f << 12)
+#define DWC3_NUM_EPS(p)		(((p)->hwparams3 &		\
+			(DWC3_NUM_EPS_MASK)) >> 12)
+#define DWC3_NUM_IN_EPS(p)	(((p)->hwparams3 &		\
+			(DWC3_NUM_IN_EPS_MASK)) >> 18)
+
 /* HWPARAMS7 */
 #define DWC3_RAM1_DEPTH(n)	((n) & 0xffff)
 
@@ -688,6 +696,8 @@ struct dwc3_scratchpad_array {
  * @u2pel: parameter from Set SEL request.
  * @u1sel: parameter from Set SEL request.
  * @u1pel: parameter from Set SEL request.
+ * @num_out_eps: number of out endpoints
+ * @num_in_eps: number of in endpoints
  * @ep0_next_event: hold the next expected event
  * @ep0state: state of endpoint zero
  * @link_state: link state
@@ -696,6 +706,8 @@ struct dwc3_scratchpad_array {
  * @hwparams: copy of hwparams registers
  * @root: debugfs root folder pointer
  * @tx_fifo_size: Available RAM size for TX fifo allocation
+ * @err_evt_seen: previous event in queue was erratic error
+ * @irq_cnt: total irq count
  */
 struct dwc3 {
 	struct usb_ctrlrequest	*ctrl_req;
@@ -706,8 +718,10 @@ struct dwc3 {
 	dma_addr_t		ep0_trb_addr;
 	dma_addr_t		ep0_bounce_addr;
 	struct dwc3_request	ep0_usb_req;
+
 	/* device lock */
 	spinlock_t		lock;
+
 	struct device		*dev;
 
 	struct dwc3_otg		*dotg;
@@ -748,7 +762,6 @@ struct dwc3 {
 	unsigned		three_stage_setup:1;
 	unsigned		ep0_bounced:1;
 	unsigned		ep0_expect_in:1;
-	unsigned		start_config_issued:1;
 	unsigned		setup_packet_pending:1;
 	unsigned		delayed_status:1;
 	unsigned		needs_fifo_resize:1;
@@ -766,6 +779,9 @@ struct dwc3 {
 	u8			u1pel;
 
 	u8			speed;
+
+	u8			num_out_eps;
+	u8			num_in_eps;
 
 	void			*mem;
 
@@ -789,6 +805,8 @@ struct dwc3 {
 #endif
 	int			tx_fifo_size;
 	bool			tx_fifo_reduced;
+	bool			err_evt_seen;
+	unsigned long		irq_cnt;
 };
 
 /* -------------------------------------------------------------------------- */
@@ -797,8 +815,8 @@ struct dwc3 {
 
 struct dwc3_event_type {
 	u32	is_devspec:1;
-	u32	type:6;
-	u32	reserved8_31:25;
+	u32	type:7;
+	u32	reserved8_31:24;
 } __packed;
 
 #define DWC3_DEPEVT_XFERCOMPLETE	0x01
@@ -874,15 +892,15 @@ struct dwc3_event_depevt {
  *	12	- VndrDevTstRcved
  * @reserved15_12: Reserved, not used
  * @event_info: Information about this event
- * @reserved31_24: Reserved, not used
+ * @reserved31_25: Reserved, not used
  */
 struct dwc3_event_devt {
 	u32	one_bit:1;
 	u32	device_event:7;
 	u32	type:4;
 	u32	reserved15_12:4;
-	u32	event_info:8;
-	u32	reserved31_24:8;
+	u32	event_info:9;
+	u32	reserved31_25:7;
 } __packed;
 
 /**
@@ -942,7 +960,7 @@ int dwc3_event_buffers_setup(struct dwc3 *dwc);
 
 extern void dwc3_set_notifier(
 		void (*notify) (struct dwc3 *dwc3, unsigned event));
-extern void dwc3_notify_event(struct dwc3 *dwc3, unsigned event);
+extern int dwc3_notify_event(struct dwc3 *dwc3, unsigned event);
 extern int dwc3_get_device_id(void);
 extern void dwc3_put_device_id(int id);
 

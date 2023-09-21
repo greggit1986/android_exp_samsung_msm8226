@@ -326,14 +326,17 @@ void mdss_dsi_panel_reset(struct mdss_panel_data *pdata, int enable)
 		msleep(50);
 
 	} else {
+		usleep_range(3000, 3000);
 		if (gpio_is_valid(ctrl_pdata->disp_en_gpio2)) {
 			pr_info("%s : Set Low TCON Enable GPIO (1.8V) \n", __func__);
 			gpio_set_value((ctrl_pdata->disp_en_gpio2), 0);
 		}
+		msleep(10);
 		if (gpio_is_valid(ctrl_pdata->disp_en_gpio)) {
 			pr_info("%s : Set Low LCD Enable GPIO (3.3V) \n", __func__);
 			gpio_set_value((ctrl_pdata->disp_en_gpio), 0);
 		}
+		msleep(300); // Chagall Panel issue
 	}
 
 }
@@ -357,7 +360,7 @@ int mdss_dsi_panel_partial_update(struct mdss_panel_data *pdata)
 	ctrl = container_of(pdata, struct mdss_dsi_ctrl_pdata,
 				panel_data);
 	mipi  = &pdata->panel_info.mipi;
-	pr_debug("%s: ctrl=%p ndx=%d\n", __func__, ctrl, ctrl->ndx);
+	pr_debug("%s: ctrl=%pK ndx=%d\n", __func__, ctrl, ctrl->ndx);
 
 	caset[1] = (((pdata->panel_info.roi_x) & 0xFF00) >> 8);
 	caset[2] = (((pdata->panel_info.roi_x) & 0xFF));
@@ -994,6 +997,9 @@ static void mdss_dsi_panel_bl_ctrl(struct mdss_panel_data *pdata,
 {
 	struct mdss_dsi_ctrl_pdata *ctrl_pdata = NULL;
 
+	//Update the bl_level in msd.dstat.bright_level even if Panel is not ON
+	msd.dstat.bright_level = bl_level;
+
 	/*Dont need to send backlight command if display off*/
 	if (msd.mfd->resume_state != MIPI_RESUME_STATE)
 		return;
@@ -1074,7 +1080,7 @@ static int mipi_samsung_disp_send_cmd(
 			if (msd.dstat.bright_level)
 				msd.dstat.recent_bright_level = msd.dstat.bright_level;
 #if defined(HBM_RE)
-			if(msd.dstat.auto_brightness == 6) {
+			if(msd.dstat.auto_brightness >= 6 && msd.dstat.bright_level == 255) {
 				cmd_size = make_brightcontrol_hbm_set();
 				msd.dstat.hbm_mode = 1;
 			} else {
@@ -1306,7 +1312,7 @@ static int mdss_dsi_panel_on(struct mdss_panel_data *pdata)
 			panel_data);
 
 	pr_debug("mdss_dsi_panel_on DSI_MODE = %d ++\n",msd.pdata->panel_info.mipi.mode);
-	pr_info("%s: ctrl=%p ndx=%d\n", __func__, ctrl, ctrl->ndx);
+	pr_info("%s: ctrl=%pK ndx=%d\n", __func__, ctrl, ctrl->ndx);
 
 	if (ctrl->shared_pdata.broadcast_enable) {
 		if (ctrl->ndx == DSI_CTRL_0) {
@@ -1354,6 +1360,8 @@ static int mdss_dsi_panel_on(struct mdss_panel_data *pdata)
 	// to prevent splash during wakeup
 	if (msd.dstat.recent_bright_level) {
 		msd.dstat.bright_level = msd.dstat.recent_bright_level;
+		if(!msd.mfd->unset_bl_level)
+			msd.mfd->unset_bl_level = msd.dstat.bright_level;
 		mipi_samsung_disp_send_cmd(PANEL_BRIGHT_CTRL, true);
 	}
 
@@ -1387,7 +1395,7 @@ static int mdss_dsi_panel_off(struct mdss_panel_data *pdata)
 	msd.dstat.on = 0;
 	msd.mfd->resume_state = MIPI_SUSPEND_STATE;
 
-	pr_info("%s: ctrl=%p ndx=%d\n", __func__, ctrl, ctrl->ndx);
+	pr_info("%s: ctrl=%pK ndx=%d\n", __func__, ctrl, ctrl->ndx);
 
 	if (ctrl->shared_pdata.broadcast_enable) {
 		if (ctrl->ndx == DSI_CTRL_0) {
@@ -1737,7 +1745,7 @@ static int mdss_dsi_parse_dcs_cmds(struct device_node *np,
 		if (dchdr->dlen > len) {
 			pr_err("%s: dtsi cmd=%x error, len=%d",
 				__func__, dchdr->dtype, dchdr->dlen);
-			return -ENOMEM;
+			goto exit_free;
 		}
 		bp += sizeof(*dchdr);
 		len -= sizeof(*dchdr);
@@ -1749,16 +1757,13 @@ static int mdss_dsi_parse_dcs_cmds(struct device_node *np,
 	if (len != 0) {
 		pr_err("%s: dcs_cmd=%x len=%d error!",
 				__func__, buf[0], blen);
-		kfree(buf);
-		return -ENOMEM;
+		goto exit_free;
 	}
 
 	pcmds->cmds = kzalloc(cnt * sizeof(struct dsi_cmd_desc),
 						GFP_KERNEL);
-	if (!pcmds->cmds){
-		kfree(buf);
-		return -ENOMEM;
-	}
+	if (!pcmds->cmds)
+		goto exit_free;
 
 	pcmds->cmd_cnt = cnt;
 	pcmds->buf = buf;
@@ -1786,6 +1791,10 @@ static int mdss_dsi_parse_dcs_cmds(struct device_node *np,
 		pcmds->buf[0], pcmds->blen, pcmds->cmd_cnt, pcmds->link_state);
 
 	return 0;
+	
+exit_free:
+	kfree(buf);
+	return -ENOMEM;
 }
 
 static int mdss_panel_parse_dt(struct device_node *np,
@@ -1962,7 +1971,7 @@ static int mdss_panel_parse_dt(struct device_node *np,
 */
 
 	mdss_panel_parse_te_params(np, pinfo);
-	
+
 	rc = of_property_read_u32(np,
 		"qcom,mdss-pan-dsi-dst-format", &tmp);
 	pinfo->mipi.dst_format =
@@ -2377,7 +2386,7 @@ static void load_tuning_file(char *filename)
 	filp = filp_open(filename, O_RDONLY, 0);
 	if (IS_ERR(filp)) {
 		printk(KERN_ERR "%s File open failed\n", __func__);
-		return;
+		goto err;
 	}
 
 	l = filp->f_path.dentry->d_inode->i_size;
@@ -2387,7 +2396,7 @@ static void load_tuning_file(char *filename)
 	if (dp == NULL) {
 		pr_info("Can't not alloc memory for tuning file load\n");
 		filp_close(filp, current->files);
-		return;
+		goto err;
 	}
 	pos = 0;
 	memset(dp, 0, l);
@@ -2400,7 +2409,7 @@ static void load_tuning_file(char *filename)
 		pr_info("vfs_read() filed ret : %d\n", ret);
 		kfree(dp);
 		filp_close(filp, current->files);
-		return;
+		goto err;
 	}
 
 	filp_close(filp, current->files);
@@ -2410,6 +2419,10 @@ static void load_tuning_file(char *filename)
 	sending_tune_cmd(dp, l);
 
 	kfree(dp);
+
+	return;
+err:
+	set_fs(fs);
 }
 
 int mdnie_adb_test;
@@ -2688,7 +2701,10 @@ static ssize_t mipi_samsung_aid_log_show(struct device *dev,
 	int rc = 0;
 
 	if (msd.dstat.is_smart_dim_loaded)
-		msd.sdimconf->print_aid_log();
+	{
+		if(msd.sdimconf->print_aid_log)
+		        msd.sdimconf->print_aid_log();
+	}
 	else
 		pr_err("smart dim is not loaded..\n");
 

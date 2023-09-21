@@ -33,7 +33,7 @@
 #include <linux/sysfs.h>
 #include <linux/types.h>
 #include <linux/io.h>
-#include <linux/android_alarm.h>
+#include <linux/hrtimer.h>
 #include <linux/thermal.h>
 #include <mach/rpm-regulator.h>
 #include <mach/rpm-regulator-smd.h>
@@ -41,6 +41,7 @@
 #include <linux/msm_thermal_ioctl.h>
 #include <mach/rpm-smd.h>
 #include <mach/scm.h>
+#include <linux/sched.h>
 
 #define MAX_CURRENT_UA 1000000
 #define MAX_RAILS 5
@@ -57,7 +58,7 @@ static bool core_control_enabled;
 static uint32_t cpus_offlined;
 static DEFINE_MUTEX(core_control_mutex);
 static uint32_t wakeup_ms;
-static struct alarm thermal_rtc;
+static struct hrtimer thermal_rtc_hrtimer;
 static struct kobject *tt_kobj;
 static struct kobject *cc_kobj;
 static struct work_struct timer_work;
@@ -1085,12 +1086,14 @@ static __ref int do_hotplug(void *data)
 {
 	int ret = 0;
 	uint32_t cpu = 0, mask = 0;
+	struct sched_param param = {.sched_priority = MAX_RT_PRIO-2};
 
 	if (!core_control_enabled) {
 		pr_debug("Core control disabled\n");
 		return -EINVAL;
 	}
 
+	sched_setscheduler(current, SCHED_FIFO, &param);
 	while (!kthread_should_stop()) {
 		while (wait_for_completion_interruptible(
 			&hotplug_notify_complete) != 0)
@@ -1435,11 +1438,11 @@ static void thermal_rtc_setup(void)
 	ktime_t wakeup_time;
 	ktime_t curr_time;
 
-	curr_time = alarm_get_elapsed_realtime();
+	curr_time = ktime_get_boottime();
 	wakeup_time = ktime_add_us(curr_time,
 			(wakeup_ms * USEC_PER_MSEC));
-	alarm_start_range(&thermal_rtc, wakeup_time,
-			wakeup_time);
+	hrtimer_start_range_ns(&thermal_rtc_hrtimer, wakeup_time,
+			ULONG_MAX, HRTIMER_MODE_ABS);
 	pr_debug("%s: Current Time: %ld %ld, Alarm set to: %ld %ld\n",
 			KBUILD_MODNAME,
 			ktime_to_timeval(curr_time).tv_sec,
@@ -1454,13 +1457,15 @@ static void timer_work_fn(struct work_struct *work)
 	sysfs_notify(tt_kobj, NULL, "wakeup_ms");
 }
 
-static void thermal_rtc_callback(struct alarm *al)
+enum hrtimer_restart thermal_rtc_callback(struct hrtimer *timer)
 {
-	struct timeval ts;
-	ts = ktime_to_timeval(alarm_get_elapsed_realtime());
+	struct timespec ts;
+	get_monotonic_boottime(&ts);
 	schedule_work(&timer_work);
 	pr_debug("%s: Time on alarm expiry: %ld %ld\n", KBUILD_MODNAME,
-			ts.tv_sec, ts.tv_usec);
+			ts.tv_sec, ts.tv_nsec / 1000);
+
+	return HRTIMER_NORESTART;
 }
 
 static int hotplug_notify(enum thermal_trip_type type, int temp, void *data)
@@ -1579,7 +1584,9 @@ static __ref int do_freq_mitigation(void *data)
 {
 	int ret = 0;
 	uint32_t cpu = 0, max_freq_req = 0, min_freq_req = 0;
+	struct sched_param param = {.sched_priority = MAX_RT_PRIO-1};
 
+	sched_setscheduler(current, SCHED_FIFO, &param);
 	while (!kthread_should_stop()) {
 		while (wait_for_completion_interruptible(
 			&freq_mitigation_complete) != 0)
@@ -2135,7 +2142,7 @@ static ssize_t store_wakeup_ms(struct kobject *kobj,
 		pr_debug("%s: Timer started for %ums\n", KBUILD_MODNAME,
 				wakeup_ms);
 	} else {
-		ret = alarm_cancel(&thermal_rtc);
+		ret = hrtimer_cancel(&thermal_rtc_hrtimer);
 		if (ret)
 			pr_debug("%s: Timer canceled\n", KBUILD_MODNAME);
 		else
@@ -3391,8 +3398,11 @@ int __init msm_thermal_late_init(void)
 	msm_thermal_add_vdd_rstr_nodes();
 	msm_thermal_add_ocr_nodes();
 	msm_thermal_add_default_temp_limit_nodes();
-	alarm_init(&thermal_rtc, ANDROID_ALARM_ELAPSED_REALTIME_WAKEUP,
-			thermal_rtc_callback);
+	hrtimer_init(&thermal_rtc_hrtimer,
+			CLOCK_BOOTTIME,
+			HRTIMER_MODE_ABS);
+	thermal_rtc_hrtimer.function=
+			&thermal_rtc_callback;
 	INIT_WORK(&timer_work, timer_work_fn);
 	msm_thermal_add_timer_nodes();
 

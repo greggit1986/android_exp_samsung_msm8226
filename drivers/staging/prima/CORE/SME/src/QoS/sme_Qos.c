@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2014 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2012-2014, 2017 The Linux Foundation. All rights reserved.
  *
  * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
  *
@@ -53,9 +53,7 @@
 #include <csrEse.h>
 #endif
 
-#ifdef DEBUG_ROAM_DELAY
 #include "vos_utils.h"
-#endif
 
 #ifndef WLAN_MDM_CODE_REDUCTION_OPT
 /* TODO : 6Mbps as Cisco APs seem to like only this value; analysis req.   */
@@ -1420,7 +1418,7 @@ sme_QosStatusType sme_QosInternalSetupReq(tpAniSirGlobal pMac,
          pentry->tspec_mask = pACInfo->tspec_mask_status;
          pentry->QoSInfo = Tspec_Info;
          VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_INFO_HIGH, 
-                   "%s: %d: Creating entry on session %d at %p with flowID %d",
+                   "%s: %d: Creating entry on session %d at %pK with flowID %d",
                    __func__, __LINE__,
                    sessionId, pentry, QosFlowID);
          csrLLInsertTail(&sme_QosCb.flow_list, &pentry->link, VOS_TRUE);
@@ -1750,7 +1748,7 @@ sme_QosStatusType sme_QosInternalSetupReq(tpAniSirGlobal pMac,
          pentry->tspec_mask = tmask;
          pentry->QoSInfo = Tspec_Info;
          VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_INFO_HIGH, 
-                   "%s: %d: On session %d creating entry at %p with flowID %d",
+                   "%s: %d: On session %d creating entry at %pK with flowID %d",
                    __func__, __LINE__,
                    sessionId, pentry, QosFlowID);
          csrLLInsertTail(&sme_QosCb.flow_list, &pentry->link, VOS_TRUE);
@@ -2011,7 +2009,7 @@ sme_QosStatusType sme_QosInternalModifyReq(tpAniSirGlobal pMac,
       flow_info->reason = SME_QOS_REASON_MODIFY;
       VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_INFO_HIGH, 
                 "%s: %d: On session %d creating modified "
-                "entry at %p with flowID %d",
+                "entry at %pK with flowID %d",
                 __func__, __LINE__,
                 sessionId, pNewEntry, pNewEntry->QosFlowID);
       //add the new entry under construction to the Flow List
@@ -2451,7 +2449,7 @@ sme_QosStatusType sme_QosInternalReleaseReq(tpAniSirGlobal pMac,
                   pACInfo->requested_QoSInfo[flow_info->tspec_mask - 1];
                //delete the entry from Flow List
                VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_INFO_HIGH, 
-                         "%s: %d: Deleting entry at %p with flowID %d",
+                         "%s: %d: Deleting entry at %pK with flowID %d",
                          __func__, __LINE__,
                          flow_info, QosFlowID);
                csrLLRemoveEntry(&sme_QosCb.flow_list, pEntry, VOS_TRUE );
@@ -2496,7 +2494,7 @@ sme_QosStatusType sme_QosInternalReleaseReq(tpAniSirGlobal pMac,
                //delete the entry from Flow List
                VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_INFO_HIGH, 
                          "%s: %d: On session %d deleting entry at "
-                         "%p with flowID %d",
+                         "%pK with flowID %d",
                          __func__, __LINE__,
                          sessionId, flow_info, QosFlowID);
                csrLLRemoveEntry(&sme_QosCb.flow_list, pEntry, VOS_TRUE );
@@ -2654,7 +2652,7 @@ sme_QosStatusType sme_QosInternalReleaseReq(tpAniSirGlobal pMac,
                           flow_info->QosFlowID);
 
             VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_INFO_HIGH,
-                      "%s: %d: Deleting entry at %p with flowID %d",
+                      "%s: %d: Deleting entry at %pK with flowID %d",
                       __func__, __LINE__,
                       flow_info, flow_info->QosFlowID);
          }
@@ -2704,7 +2702,7 @@ sme_QosStatusType sme_QosInternalReleaseReq(tpAniSirGlobal pMac,
          pACInfo->num_flows[flow_info->tspec_mask - 1]--;
          //delete the entry from Flow List
          VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_INFO_HIGH, 
-                   "%s: %d: On session %d deleting entry at %p with flowID %d",
+                   "%s: %d: On session %d deleting entry at %pK with flowID %d",
                    __func__, __LINE__,
                    sessionId, flow_info, QosFlowID);
          csrLLRemoveEntry(&sme_QosCb.flow_list, pEntry, VOS_TRUE );
@@ -3155,7 +3153,7 @@ eHalStatus sme_QosESEProcessReassocTspecRsp(tpAniSirGlobal pMac, v_U8_t sessionI
     }
 
     VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_WARN,
-             "TspecLen = %d, pbFrames = %p, pTspecIE = %p",
+             "TspecLen = %d, pbFrames = %pK, pTspecIE = %pK",
              tspecIeLen, pCsrConnectedInfo->pbFrames, pTspecIE);
 
     numTspec = (tspecIeLen)/sizeof(tDot11fIEWMMTSPEC);
@@ -6244,7 +6242,7 @@ static eHalStatus sme_QosBufferExistingFlows(tpAniSirGlobal pMac,
          }
          //delete the entry from Flow List
          VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_INFO_HIGH, 
-                   "%s: %d: Deleting original entry at %p with flowID %d",
+                   "%s: %d: Deleting original entry at %pK with flowID %d",
                    __func__, __LINE__,
                    flow_info, flow_info->QosFlowID);
          csrLLRemoveEntry(&sme_QosCb.flow_list, pEntry, VOS_TRUE );
@@ -6295,7 +6293,7 @@ static eHalStatus sme_QosDeleteExistingFlows(tpAniSirGlobal pMac,
                                    flow_info->QosFlowID);
          }
          VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_INFO_HIGH,
-                   "%s: %d: Deleting entry at %p with flowID %d",
+                   "%s: %d: Deleting entry at %pK with flowID %d",
                    __func__, __LINE__,
                    flow_info, flow_info->QosFlowID);
          //delete the entry from Flow List
@@ -6688,7 +6686,7 @@ eHalStatus sme_QosModifyFnp(tpAniSirGlobal pMac, tListElem *pEntry)
    case SME_QOS_REASON_MODIFY:
       //delete the original entry from Flow List
       VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_INFO_HIGH, 
-                "%s: %d: Deleting original entry at %p with flowID %d",
+                "%s: %d: Deleting original entry at %pK with flowID %d",
                 __func__, __LINE__,
                 flow_info, flow_info->QosFlowID);
       csrLLRemoveEntry(&sme_QosCb.flow_list, pEntry, VOS_TRUE );
@@ -6887,7 +6885,7 @@ eHalStatus sme_QosReassocSuccessEvFnp(tpAniSirGlobal pMac, tListElem *pEntry)
    {
       //delete the entry from Flow List
       VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_INFO_HIGH, 
-                "%s: %d: Deleting entry at %p with flowID %d",
+                "%s: %d: Deleting entry at %pK with flowID %d",
                 __func__, __LINE__,
                 flow_info, flow_info->QosFlowID);
       csrLLRemoveEntry(&sme_QosCb.flow_list, pEntry, VOS_TRUE );
@@ -6990,7 +6988,7 @@ eHalStatus sme_QosAddTsFailureFnp(tpAniSirGlobal pMac, tListElem *pEntry)
       }
       //delete the entry from Flow List
       VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_INFO_HIGH, 
-                "%s: %d: Deleting entry at %p with flowID %d",
+                "%s: %d: Deleting entry at %pK with flowID %d",
                 __func__, __LINE__,
                 flow_info, flow_info->QosFlowID);
       csrLLRemoveEntry(&sme_QosCb.flow_list, pEntry, VOS_TRUE );
@@ -7176,16 +7174,7 @@ eHalStatus sme_QosAddTsSuccessFnp(tpAniSirGlobal pMac, tListElem *pEntry)
       {
          //For downgrading purpose Hdd set WmmTspecValid to false during roaming
          //So need to set that flag we need to call the hdd in successful case.
-         if((hdd_status == SME_QOS_STATUS_SETUP_SUCCESS_IND)
-#if defined (WLAN_FEATURE_VOWIFI_11R)
-            &&
-            (!csrRoamIs11rAssoc(pMac))
-#endif
-#if defined(FEATURE_WLAN_ESE)
-            &&
-            (!csrRoamIsCCXAssoc(pMac))
-#endif
-           )
+         if(hdd_status == SME_QOS_STATUS_SETUP_SUCCESS_IND)
          {
              VOS_TRACE(VOS_MODULE_ID_HDD, VOS_TRACE_LEVEL_INFO,
                        "%s calling hdd_wmm_smecallback during  roaming for ac = %d", __func__, ac);
@@ -7199,26 +7188,25 @@ eHalStatus sme_QosAddTsSuccessFnp(tpAniSirGlobal pMac, tListElem *pEntry)
       }
    }
 
-#ifdef DEBUG_ROAM_DELAY
-
-   if (pACInfo->curr_QoSInfo[pACInfo->tspec_pending - 1].ts_info.up ==  SME_QOS_WMM_UP_VO ||
-       pACInfo->curr_QoSInfo[pACInfo->tspec_pending - 1].ts_info.up ==  SME_QOS_WMM_UP_NC)
+   if (pMac->roam.configParam.roamDelayStatsEnabled)
    {
-      vos_record_roam_event(e_SME_VO_ADDTS_RSP, NULL, 0);
-   }
+       if (pACInfo->curr_QoSInfo[pACInfo->tspec_pending - 1].ts_info.up ==  SME_QOS_WMM_UP_VO ||
+           pACInfo->curr_QoSInfo[pACInfo->tspec_pending - 1].ts_info.up ==  SME_QOS_WMM_UP_NC)
+       {
+           vos_record_roam_event(e_SME_VO_ADDTS_RSP, NULL, 0);
+       }
 
-   if (pACInfo->curr_QoSInfo[pACInfo->tspec_pending - 1].ts_info.up ==  SME_QOS_WMM_UP_VI||
-       pACInfo->curr_QoSInfo[pACInfo->tspec_pending - 1].ts_info.up ==  SME_QOS_WMM_UP_CL)
-
-   {
-      vos_record_roam_event(e_SME_VI_ADDTS_RSP, NULL, 0);
+       if (pACInfo->curr_QoSInfo[pACInfo->tspec_pending - 1].ts_info.up ==  SME_QOS_WMM_UP_VI ||
+           pACInfo->curr_QoSInfo[pACInfo->tspec_pending - 1].ts_info.up ==  SME_QOS_WMM_UP_CL)
+       {
+           vos_record_roam_event(e_SME_VI_ADDTS_RSP, NULL, 0);
+       }
    }
-#endif
 
    if(delete_entry)
    {
       VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_INFO_HIGH, 
-                "%s: %d: Deleting entry at %p with flowID %d",
+                "%s: %d: Deleting entry at %pK with flowID %d",
                 __func__, __LINE__,
                 flow_info, flow_info->QosFlowID);
       //delete the entry from Flow List
@@ -7447,7 +7435,7 @@ void sme_QosPmcDeviceStateUpdateInd(void *callbackContext, tPmcState pmcState)
       break;
    default:
       status = eHAL_STATUS_SUCCESS;
-      VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_ERROR, 
+      VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_INFO,
                 "%s: %d: nothing to process in PMC state %s (%d)",
                 __func__, __LINE__,
                 sme_PmcStatetoString(pmcState), pmcState);
@@ -7648,6 +7636,99 @@ v_BOOL_t sme_QosIsTSInfoAckPolicyValid(tpAniSirGlobal pMac,
   }
 
   vos_mem_free(pIes);
+  return VOS_TRUE;
+}
+
+/*--------------------------------------------------------------------------
+  \brief sme_QosTspecActive() - The SME QoS API exposed to HDD to
+  check no of active Tspecs
+
+  \param pMac - The handle returned by macOpen.
+  \param ac - Determines type of Access Category
+  \param sessionId - sessionId returned by sme_OpenSession.
+
+  \return VOS_TRUE -When there is no error with pSession
+
+  \sa
+  --------------------------------------------------------------------------*/
+v_BOOL_t sme_QosTspecActive(tpAniSirGlobal pMac,
+    WLANTL_ACEnumType ac, v_U8_t sessionId, v_U8_t *pActiveTspec)
+{
+  sme_QosSessionInfo *pSession = NULL;
+  sme_QosACInfo *pACInfo = NULL;
+
+  if( !CSR_IS_SESSION_VALID( pMac, sessionId ) )
+  {
+     VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_ERROR,
+               "%s: %d: Session Id %d is invalid",
+               __func__, __LINE__,
+               sessionId);
+     return VOS_FALSE;
+  }
+
+  pSession = &sme_QosCb.sessionInfo[sessionId];
+
+  if (NULL == pSession)
+  {
+      VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_ERROR,
+         "%s: %d pSession not found sessionId:%d",__func__,__LINE__,sessionId);
+      return VOS_FALSE;
+  }
+
+  if( !pSession->sessionActive )
+  {
+     VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_ERROR,
+               "%s: %d: Session %d is inactive",
+               __func__, __LINE__,
+               sessionId);
+     return VOS_FALSE;
+  }
+
+  VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_INFO_HIGH,
+            "%s: %d: Session %d is active", __func__, __LINE__, sessionId);
+
+  pACInfo = &pSession->ac_info[ac];
+
+  // Does this AC have QoS active?
+  if( SME_QOS_QOS_ON == pACInfo->curr_state )
+  {
+     // Yes, QoS is active on this AC
+     VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_INFO_HIGH,
+               "%s: %d: On session %d AC %d has QoS active",
+               __func__, __LINE__, sessionId, ac);
+
+     // Are any TSPECs active?
+     if( pACInfo->tspec_mask_status )
+     {
+         // Yes, at least 1 TSPEC is active.  Are they both active?
+         if( SME_QOS_TSPEC_MASK_BIT_1_2_SET == pACInfo->tspec_mask_status )
+         {
+             //both TSPECS are active
+             *pActiveTspec = 2;
+         }
+         else
+         {
+             // only one TSPEC is active
+             *pActiveTspec = 1;
+         }
+     }
+     else
+     {
+        *pActiveTspec = 0;
+     }
+  }
+  else
+  {
+    // Hardcoding value to INVALID_TSPEC (invalid non-zero in this context,
+    // valid values are 0,1,2) to indicate the caller not to update UAPSD
+    // parameters as QOS is not active
+
+     *pActiveTspec = INVALID_TSPEC;
+     VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_INFO_HIGH,
+               "%s: %d: On session %d AC %d has no QoS active",
+               __func__, __LINE__, sessionId, ac);
+  }
+
   return VOS_TRUE;
 }
 

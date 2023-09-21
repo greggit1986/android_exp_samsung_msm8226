@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2013, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -221,6 +221,7 @@ extern unsigned int system_rev;
 int msm_dss_enable_vreg(struct dss_vreg *in_vreg, int num_vreg, int enable)
 {
 	int i = 0, rc = 0;
+	bool need_sleep;
 	if (enable) {
 		for (i = 0; i < num_vreg; i++) {
 #if defined(CONFIG_MACH_MONDRIAN) || defined(CONFIG_MACH_CHAGALL)
@@ -248,7 +249,8 @@ int msm_dss_enable_vreg(struct dss_vreg *in_vreg, int num_vreg, int enable)
 					in_vreg[i].vreg_name, rc);
 				goto vreg_set_opt_mode_fail;
 			}
-			if (in_vreg[i].pre_on_sleep)
+			need_sleep = !regulator_is_enabled(in_vreg[i].vreg);
+			if (in_vreg[i].pre_on_sleep && need_sleep)
 				msleep(in_vreg[i].pre_on_sleep);
 			rc = regulator_set_optimum_mode(in_vreg[i].vreg,
 				in_vreg[i].enable_load);
@@ -259,7 +261,7 @@ int msm_dss_enable_vreg(struct dss_vreg *in_vreg, int num_vreg, int enable)
 				goto vreg_set_opt_mode_fail;
 			}
 			rc = regulator_enable(in_vreg[i].vreg);
-			if (in_vreg[i].post_on_sleep)
+			if (in_vreg[i].post_on_sleep && need_sleep)
 				msleep(in_vreg[i].post_on_sleep);
 			if (rc < 0) {
 				DEV_ERR("%pS->%s: %s enable failed\n",
@@ -291,6 +293,13 @@ int msm_dss_enable_vreg(struct dss_vreg *in_vreg, int num_vreg, int enable)
 #ifdef CONFIG_FB_MSM_MIPI_MAGNA_OCTA_VIDEO_WXGA_PT_DUAL_PANEL
 				if(!strncmp(in_vreg[i].vreg_name, "vdd", 4)) {
 					pr_err("%s : VDD disable skip!!\n", __func__);
+					continue;
+				}
+#endif
+#ifdef CONFIG_MACH_KLIMT_LTE_DCM
+				/* VREG_LVS1_1P8 Always On due to Audio(MP3) Play Mute Problem */
+				if(!strncmp(in_vreg[i].vreg_name, "vdd3", 4)) {	// VREG_LVS1_1P8 1.8V
+					pr_err("%s : VDD3 disable skip!!\n", __func__);
 					continue;
 				}
 #endif

@@ -56,6 +56,13 @@ extern int poweroff_charging;
 #define TK_CMD_DUAL_DETECTION			0x01
 #define TK_BIT_DETECTION_CONFIRM		0xEE
 #define CRC_CHECK_DELAY
+#elif defined(CONFIG_MACH_JS01LTEDCM)
+#define CYPRESS_SUPPORT_DUAL_INT_MODE
+#define CYPRESS_RECENT_BACK_REPORT_FW_VER	0x09
+#define TK_CMD_INTERRUPT_SET_REG		0x18
+#define CYPRESS_DETECTION_FLAG			0x1B
+#define TK_CMD_DUAL_DETECTION			0x01
+#define TK_BIT_DETECTION_CONFIRM		0xEE
 #else
 #undef CYPRESS_SUPPORT_DUAL_INT_MODE
 #define CYPRESS_RECENT_BACK_REPORT_FW_VER	0xFF
@@ -353,6 +360,7 @@ struct cypress_touchkey_info {
 
 	u8	touchkeyid;
 	bool	support_fw_update;
+	atomic_t	keypad_enable;
 	bool	do_checksum;
 	struct wake_lock fw_wakelock;
 };

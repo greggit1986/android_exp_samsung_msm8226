@@ -55,6 +55,10 @@
 #define ABOV_VENDORID		0x12
 #define ABOV_GLOVE			0x13
 
+#ifdef CONFIG_KEYBOARD_ABOV_DUAL_DETECT
+#define ABOV_DUAL_DETECT	0x16
+#endif
+
 /* command */
 #define CMD_LED_ON			0x10
 #define CMD_LED_OFF			0x20
@@ -65,22 +69,34 @@
 #define CMD_GLOVE_ON		0x20
 #define CMD_GLOVE_OFF		0x10
 
-#define ABOV_BOOT_DELAY		16
+#ifdef CONFIG_KEYBOARD_ABOV_DUAL_DETECT
+#define CMD_DUAL_DETECT		0x10
+#endif
+
+#define CMD_SINGLE_DETECT	0x20
+
+#define ABOV_BOOT_DELAY		45
 #define ABOV_RESET_DELAY	94
 
 struct device *sec_touchkey;
 #if !defined(CONFIG_SEC_HESTIA_PROJECT)
 
-#define FW_VERSION 0x13
+#define FW_VERSION 0x15
 
-#define FW_CHECKSUM_H 0x06
-#define FW_CHECKSUM_L 0x16
+#define FW_CHECKSUM_H 0xB6
+#define FW_CHECKSUM_L 0xCE
 #define TK_FW_PATH_BIN "abov/abov_tk.fw"
 #define TK_FW_PATH_SDCARD "/sdcard/abov_fw.bin"
 
-#else
+#ifdef CONFIG_KEYBOARD_ABOV_DUAL_DETECT
+#define ABOV_DUAL_DETECTION_CMD_FW_VER	0x14
+#endif
+
 #define FW_VERSION 0x06
 
+#ifdef CONFIG_KEYBOARD_ABOV_DUAL_DETECT
+#define ABOV_DUAL_DETECTION_CMD_FW_VER	0xFF
+#endif
 #define FW_CHECKSUM_H 0x94
 #define FW_CHECKSUM_L 0x86
 #define FW_CHECKSUM_H_REV4 0xE4
@@ -138,6 +154,7 @@ struct abov_tk_info {
 	bool enabled;
 	bool fw_update_possible;
 	bool glovemode;
+	bool dual_mode;
 };
 
 
@@ -149,6 +166,10 @@ static void abov_tk_late_resume(struct early_suspend *h);
 #ifdef CONFIG_INPUT_ENABLED
 static int abov_tk_input_open(struct input_dev *dev);
 static void abov_tk_input_close(struct input_dev *dev);
+
+#ifdef CONFIG_KEYBOARD_ABOV_DUAL_DETECT
+static void abov_tk_dual_detection_mode(struct abov_tk_info *info, int mode);
+#endif
 #endif
 
 static int abov_glove_mode_enable(struct i2c_client *client, u8 cmd)
@@ -328,7 +349,9 @@ static void abov_tk_reset(struct abov_tk_info *info)
 
 	abov_tk_reset_for_bootmode(info);
 	msleep(ABOV_RESET_DELAY);
-
+#ifdef CONFIG_KEYBOARD_ABOV_DUAL_DETECT
+	abov_tk_dual_detection_mode(info, 1);
+#endif
 	if (info->glovemode)
 		abov_glove_mode_enable(client, CMD_GLOVE_ON);
 
@@ -343,7 +366,7 @@ static irqreturn_t abov_tk_interrupt(int irq, void *dev_id)
 	struct abov_tk_info *info = dev_id;
 	struct i2c_client *client = info->client;
 	int ret, retry;
-	u8 buf, button;
+	u8 buf;
 	bool press;
 
 	ret = abov_tk_i2c_read(client, ABOV_BTNSTATUS, &buf, 1);
@@ -363,33 +386,60 @@ static irqreturn_t abov_tk_interrupt(int irq, void *dev_id)
 			return IRQ_HANDLED;
 		}
 	}
+	if (info->dual_mode) {
+		int menu_data = buf & 0x03;
+		int back_data = (buf >> 2) & 0x03;
+		u8 menu_press = !(menu_data % 2);
+		u8 back_press = !(back_data % 2);
 
-	button = buf & 0x03;
-	press = !!(buf & 0x8);
-
-	if (press) {
-		input_report_key(info->input_dev,
-			touchkey_keycode[button], 0);
+		if (menu_data)
+			input_report_key(info->input_dev,
+				touchkey_keycode[1], menu_press);
+		if (back_data)
+			input_report_key(info->input_dev,
+				touchkey_keycode[2], back_press);
 #ifdef CONFIG_SAMSUNG_PRODUCT_SHIP
 		dev_notice(&client->dev,
-			"key R\n");
+			"key %s%s ver0x%02x\n",
+			menu_data ? (menu_press ? "P" : "R") : "",
+			back_data ? (back_press ? "P" : "R") : "",
+			info->fw_ver);
 #else
 		dev_notice(&client->dev,
-			"key R : %d(%d)\n",
-			touchkey_keycode[button], buf);
+			"%s%s%x ver0x%02x\n",
+			menu_data ? (menu_press ? "menu P " : "menu R ") : "",
+			back_data ? (back_press ? "back P " : "back R ") : "",
+			buf, info->fw_ver);
 #endif
+	
 	} else {
-		input_report_key(info->input_dev,
-			touchkey_keycode[button], 1);
+		u8 button = buf & 0x03;
+		press = !!(buf & 0x8);
+
+		if (press) {
+			input_report_key(info->input_dev,
+				touchkey_keycode[button], 0);
 #ifdef CONFIG_SAMSUNG_PRODUCT_SHIP
-		dev_notice(&client->dev,
-			"key P\n");
+			dev_notice(&client->dev,
+				"key R\n");
 #else
-		dev_notice(&client->dev,
-			"key P : %d(%d)\n",
-			touchkey_keycode[button], buf);
+			dev_notice(&client->dev,
+				"key R : %d(%d) ver0x%02x\n",
+				touchkey_keycode[button], buf, info->fw_ver);
+#endif
+		} else {
+			input_report_key(info->input_dev,
+				touchkey_keycode[button], 1);
+#ifdef CONFIG_SAMSUNG_PRODUCT_SHIP
+			dev_notice(&client->dev,
+				"key P\n");
+#else
+			dev_notice(&client->dev,
+				"key P : %d(%d)\n",
+				touchkey_keycode[button], buf);
 #endif
 	}
+}
 	input_sync(info->input_dev);
 
 	return IRQ_HANDLED;
@@ -837,7 +887,7 @@ void abov_firm_write(const u8 *fw_data, int block, int scl, int sda)
 
 		pos += 0x20;
 
-		msleep(2);
+		usleep(3*1000);
 	}
 }
 
@@ -866,7 +916,7 @@ void abov_checksum(struct abov_tk_info *info, int scl, int sda)
 	u8 checksuml;
 
 	abov_read_address_set(scl, sda);
-	msleep(5);
+	usleep(5*1000);
 
 	abov_i2c_start(scl, sda);
 	abov_testdelay();
@@ -907,7 +957,7 @@ static int abov_fw_update(struct abov_tk_info *info,
 				const u8 *fw_data, int block, int scl, int sda)
 {
 	abov_enter_mode(scl, sda);
-	msleep(600);
+	msleep(1100);
 	abov_firm_write(fw_data, block, scl, sda);
 	abov_checksum(info, scl, sda);
 	return 0;
@@ -1068,6 +1118,9 @@ static ssize_t touchkey_fw_update(struct device *dev,
 	disable_irq(info->irq);
 	info->enabled = false;
 	ret = abov_flash_fw(info, false, cmd);
+#ifdef CONFIG_KEYBOARD_ABOV_DUAL_DETECT
+	abov_tk_dual_detection_mode(info, 1);
+#endif
 	if (info->glovemode)
 		abov_glove_mode_enable(client, CMD_GLOVE_ON);
 	info->enabled = true;
@@ -1162,6 +1215,55 @@ static ssize_t abov_glove_mode_show(struct device *dev,
 	return sprintf(buf, "%d\n", info->glovemode);
 }
 
+#ifdef CONFIG_KEYBOARD_ABOV_DUAL_DETECT
+static void abov_tk_dual_detection_mode(struct abov_tk_info *info, int mode)
+{
+	u8 cmd;
+	int ret;
+
+	if (info->fw_ver < ABOV_DUAL_DETECTION_CMD_FW_VER){
+		info->dual_mode = false;
+		return;
+	}
+
+	dev_info(&info->client->dev,
+			"%s: %s\n", __func__, mode ? "on" : "off");
+
+	if (mode)
+		cmd = CMD_DUAL_DETECT;
+	else
+		cmd = CMD_SINGLE_DETECT;
+
+	ret = abov_tk_i2c_write(info->client, ABOV_DUAL_DETECT, &cmd, 1);
+	if (ret < 0)
+		dev_err(&info->client->dev,
+			"%s %d : fail %d\n", __func__, __LINE__, ret);
+
+	info->dual_mode = !!mode;
+}
+
+static ssize_t abov_set_dual_detection_mode(struct device *dev,
+	 struct device_attribute *attr, const char *buf, size_t count)
+{
+	struct abov_tk_info *info = dev_get_drvdata(dev);
+	int scan_buffer;
+	int ret;
+
+	ret = sscanf(buf, "%d", &scan_buffer);
+	if (ret != 1) {
+		dev_err(&info->client->dev, "%s: cmd read err\n", __func__);
+		return count;
+	}
+
+	if (!info->enabled)
+		return count;
+
+	abov_tk_dual_detection_mode(info, !!scan_buffer);
+
+	return count;
+}
+#endif
+
 static DEVICE_ATTR(touchkey_threshold, S_IRUGO, touchkey_threshold_show, NULL);
 static DEVICE_ATTR(brightness, S_IRUGO | S_IWUSR | S_IWGRP, NULL,
 			touchkey_led_control);
@@ -1177,7 +1279,10 @@ static DEVICE_ATTR(touchkey_firm_update_status, S_IRUGO | S_IWUSR | S_IWGRP,
 			touchkey_fw_update_status, NULL);
 static DEVICE_ATTR(glove_mode, S_IRUGO | S_IWUSR | S_IWGRP,
 			abov_glove_mode_show, abov_glove_mode);
-
+#ifdef CONFIG_KEYBOARD_ABOV_DUAL_DETECT
+static DEVICE_ATTR(detection_mode, S_IRUGO | S_IWUSR | S_IWGRP,
+			NULL, abov_set_dual_detection_mode);
+#endif
 static struct attribute *sec_touchkey_attributes[] = {
 	&dev_attr_touchkey_threshold.attr,
 	&dev_attr_brightness.attr,
@@ -1190,6 +1295,9 @@ static struct attribute *sec_touchkey_attributes[] = {
 	&dev_attr_touchkey_firm_update.attr,
 	&dev_attr_touchkey_firm_update_status.attr,
 	&dev_attr_glove_mode.attr,
+#ifdef CONFIG_KEYBOARD_ABOV_DUAL_DETECT
+	&dev_attr_detection_mode.attr,
+#endif
 	NULL,
 };
 
@@ -1478,6 +1586,9 @@ static int __devinit abov_tk_probe(struct i2c_client *client,
 			"failed to firmware check (%d)\n", ret);
 		goto err_reg_input_dev;
 	}
+#ifdef CONFIG_KEYBOARD_ABOV_DUAL_DETECT
+	abov_tk_dual_detection_mode(info, 1);
+#endif
 	snprintf(info->phys, sizeof(info->phys),
 		 "%s/input0", dev_name(&client->dev));
 	input_dev->name = "sec_touchkey";
@@ -1633,7 +1744,6 @@ static int abov_tk_suspend(struct device *dev)
 #endif
 #endif
 
-
 	return 0;
 }
 
@@ -1660,6 +1770,9 @@ static int abov_tk_resume(struct device *dev)
 	} else
 		/* touchkey on by i2c */
 		get_tk_fw_version(info, true);
+#endif
+#ifdef CONFIG_KEYBOARD_ABOV_DUAL_DETECT
+	abov_tk_dual_detection_mode(info, 1);
 #endif
 	info->enabled = true;
 #if defined(CONFIG_SEC_ATLANTIC_PROJECT)

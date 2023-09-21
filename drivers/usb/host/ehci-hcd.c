@@ -288,7 +288,7 @@ static int handshake_on_error_set_halt(struct ehci_hcd *ehci, void __iomem *ptr,
 	if (error) {
 		ehci_halt(ehci);
 		ehci->rh_state = EHCI_RH_HALTED;
-		ehci_err(ehci, "force halt; handshake %p %08x %08x -> %d\n",
+		ehci_err(ehci, "force halt; handshake %pK %08x %08x -> %d\n",
 			ptr, mask, done, error);
 	}
 
@@ -684,7 +684,9 @@ static int ehci_init(struct usb_hcd *hcd)
 	hw = ehci->async->hw;
 	hw->hw_next = QH_NEXT(ehci, ehci->async->qh_dma);
 	hw->hw_info1 = cpu_to_hc32(ehci, QH_HEAD);
+#if defined(CONFIG_PPC_PS3)
 	hw->hw_info1 |= cpu_to_hc32(ehci, (1 << 7));	/* I = 1 */
+#endif
 	hw->hw_token = cpu_to_hc32(ehci, QTD_STS_HALT);
 	hw->hw_qtd_next = EHCI_LIST_END(ehci);
 	ehci->async->qh_state = QH_STATE_LINKED;
@@ -1136,7 +1138,7 @@ static int ehci_urb_dequeue(struct usb_hcd *hcd, struct urb *urb, int status)
 			qh_completions (ehci, qh);
 			break;
 		default:
-			ehci_dbg (ehci, "bogus qh %p state %d\n",
+			ehci_dbg (ehci, "bogus qh %pK state %d\n",
 					qh, qh->qh_state);
 			goto done;
 		}
@@ -1215,7 +1217,7 @@ idle_timeout:
 		/* caller was supposed to have unlinked any requests;
 		 * that's not our job.  just leak this memory.
 		 */
-		ehci_err (ehci, "qh %p (#%02x) state %d%s\n",
+		ehci_err (ehci, "qh %pK (#%02x) state %d%s\n",
 			qh, ep->desc.bEndpointAddress, qh->qh_state,
 			list_empty (&qh->qtd_list) ? "" : "(has tds)");
 		break;

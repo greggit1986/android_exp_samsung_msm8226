@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2016, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -95,6 +95,7 @@ struct msm_compr_pdata {
 	struct msm_compr_audio_effects *audio_effects[MSM_FRONTEND_DAI_MAX];
 	bool use_dsp_gapless_mode;
 	struct msm_compr_dec_params *dec_params[MSM_FRONTEND_DAI_MAX];
+	bool is_in_use[MSM_FRONTEND_DAI_MAX];
 };
 
 struct msm_compr_audio {
@@ -422,6 +423,28 @@ static void compr_event_handler(uint32_t opcode,
 				} else
 					msm_compr_send_buffer(prtd);
 			}
+
+			/*
+			 * The condition below ensures playback finishes in the
+			 * follow cornercase
+			 * WRITE(last buffer)
+			 * WAIT_FOR_DRAIN
+			 * PAUSE
+			 * WRITE_DONE(X)
+			 * RESUME
+			 */
+			if ((prtd->copied_total == prtd->bytes_sent) &&
+			    atomic_read(&prtd->drain)) {
+				pr_debug("RUN ack, wake up & continue pending drain\n");
+
+				if (prtd->last_buffer)
+					prtd->last_buffer = 0;
+
+				prtd->drain_ready = 1;
+				wake_up(&prtd->drain_wait);
+				atomic_set(&prtd->drain, 0);
+			}
+
 			spin_unlock(&prtd->lock);
 			break;
 		case ASM_STREAM_CMD_FLUSH:
@@ -631,6 +654,11 @@ static int msm_compr_configure_dsp(struct snd_compr_stream *cstream)
 		pr_err("%s: Send SoftVolume Param failed ret=%d\n",
 			__func__, ret);
 
+	ret = q6asm_set_softpause(ac, &softpause);
+	if (ret < 0)
+		pr_err("%s: Send SoftPause Param failed ret=%d\n",
+				__func__, ret);
+
 	ret = q6asm_set_io_mode(ac, (COMPRESSED_STREAM_IO | ASYNC_IO_MODE));
 	if (ret < 0) {
 		pr_err("%s: Set IO mode failed\n", __func__);
@@ -670,11 +698,16 @@ static int msm_compr_open(struct snd_compr_stream *cstream)
 {
 	struct snd_compr_runtime *runtime = cstream->runtime;
 	struct snd_soc_pcm_runtime *rtd = cstream->private_data;
-	struct msm_compr_audio *prtd;
+	struct msm_compr_audio *prtd = NULL;
 	struct msm_compr_pdata *pdata =
 			snd_soc_platform_get_drvdata(rtd->platform);
 
 	pr_debug("%s\n", __func__);
+	if (pdata->is_in_use[rtd->dai_link->be_id] == true) {
+		pr_err("%s: %s is already in use,err: %d ",
+			__func__, rtd->dai_link->cpu_dai_name, -EBUSY);
+		return -EBUSY;
+	}
 	prtd = kzalloc(sizeof(struct msm_compr_audio), GFP_KERNEL);
 	if (prtd == NULL) {
 		pr_err("Failed to allocate memory for msm_compr_audio\n");
@@ -685,7 +718,7 @@ static int msm_compr_open(struct snd_compr_stream *cstream)
 	pdata->cstream[rtd->dai_link->be_id] = cstream;
 	pdata->audio_effects[rtd->dai_link->be_id] =
 		 kzalloc(sizeof(struct msm_compr_audio_effects), GFP_KERNEL);
-	if (!pdata->audio_effects[rtd->dai_link->be_id]) {
+	if (pdata->audio_effects[rtd->dai_link->be_id] == NULL) {
 		pr_err("%s: Could not allocate memory for effects\n", __func__);
 		pdata->cstream[rtd->dai_link->be_id] = NULL;
 		kfree(prtd);
@@ -693,10 +726,11 @@ static int msm_compr_open(struct snd_compr_stream *cstream)
 	}
 	pdata->dec_params[rtd->dai_link->be_id] =
 		 kzalloc(sizeof(struct msm_compr_dec_params), GFP_KERNEL);
-	if (!pdata->dec_params[rtd->dai_link->be_id]) {
+	if (pdata->dec_params[rtd->dai_link->be_id] == NULL) {
 		pr_err("%s: Could not allocate memory for dec params\n",
 			__func__);
 		kfree(pdata->audio_effects[rtd->dai_link->be_id]);
+		pdata->audio_effects[rtd->dai_link->be_id] = NULL;
 		pdata->cstream[rtd->dai_link->be_id] = NULL;
 		kfree(prtd);
 		return -ENOMEM;
@@ -706,7 +740,9 @@ static int msm_compr_open(struct snd_compr_stream *cstream)
 	if (!prtd->audio_client) {
 		pr_err("%s: Could not allocate memory for client\n", __func__);
 		kfree(pdata->audio_effects[rtd->dai_link->be_id]);
+		pdata->audio_effects[rtd->dai_link->be_id] = NULL;
 		kfree(pdata->dec_params[rtd->dai_link->be_id]);
+		pdata->dec_params[rtd->dai_link->be_id] = NULL;
 		pdata->cstream[rtd->dai_link->be_id] = NULL;
 		kfree(prtd);
 		return -ENOMEM;
@@ -765,7 +801,7 @@ static int msm_compr_open(struct snd_compr_stream *cstream)
 	} else {
 		pr_err("%s: Unsupported stream type", __func__);
 	}
-
+	pdata->is_in_use[rtd->dai_link->be_id] = true;
 	return 0;
 }
 
@@ -837,10 +873,17 @@ static int msm_compr_free(struct snd_compr_stream *cstream)
 	q6asm_audio_client_buf_free_contiguous(dir, ac);
 
 	q6asm_audio_client_free(ac);
-
-	kfree(pdata->audio_effects[soc_prtd->dai_link->be_id]);
-	kfree(pdata->dec_params[soc_prtd->dai_link->be_id]);
+	if (pdata->audio_effects[soc_prtd->dai_link->be_id] != NULL) {
+		kfree(pdata->audio_effects[soc_prtd->dai_link->be_id]);
+		pdata->audio_effects[soc_prtd->dai_link->be_id] = NULL;
+	}
+	if (pdata->dec_params[soc_prtd->dai_link->be_id] != NULL) {
+		kfree(pdata->dec_params[soc_prtd->dai_link->be_id]);
+		pdata->dec_params[soc_prtd->dai_link->be_id] = NULL;
+	}
+	pdata->is_in_use[soc_prtd->dai_link->be_id] = false;
 	kfree(prtd);
+	runtime->private_data = NULL;
 
 	return 0;
 }
@@ -1873,6 +1916,7 @@ static int msm_compr_probe(struct snd_soc_platform *platform)
 		pdata->audio_effects[i] = NULL;
 		pdata->dec_params[i] = NULL;
 		pdata->cstream[i] = NULL;
+		pdata->is_in_use[i] = false;
 	}
 
 	/*
@@ -1899,7 +1943,7 @@ static int msm_compr_audio_effects_config_info(struct snd_kcontrol *kcontrol,
 					       struct snd_ctl_elem_info *uinfo)
 {
 	uinfo->type = SNDRV_CTL_ELEM_TYPE_INTEGER;
-	uinfo->count = 128;
+	uinfo->count = MAX_PP_PARAMS_SZ;
 	uinfo->value.integer.min = 0;
 	uinfo->value.integer.max = 0xFFFFFFFF;
 	return 0;

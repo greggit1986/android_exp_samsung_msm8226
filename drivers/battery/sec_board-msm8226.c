@@ -353,16 +353,16 @@ static void * samsung_battery_data;
 #define TEMP_LOW_THRESHOLD_LPM     (-50)
 #define TEMP_LOW_RECOVERY_LPM      0
 #elif defined(CONFIG_SEC_ATLANTIC3G_COMMON)
-#define TEMP_HIGH_THRESHOLD_EVENT  600
-#define TEMP_HIGH_RECOVERY_EVENT   460
+#define TEMP_HIGH_THRESHOLD_EVENT  580
+#define TEMP_HIGH_RECOVERY_EVENT   530
 #define TEMP_LOW_THRESHOLD_EVENT   (-50)
 #define TEMP_LOW_RECOVERY_EVENT    0
-#define TEMP_HIGH_THRESHOLD_NORMAL 600
-#define TEMP_HIGH_RECOVERY_NORMAL  460
+#define TEMP_HIGH_THRESHOLD_NORMAL 580
+#define TEMP_HIGH_RECOVERY_NORMAL  530
 #define TEMP_LOW_THRESHOLD_NORMAL  (-50)
 #define TEMP_LOW_RECOVERY_NORMAL   0
-#define TEMP_HIGH_THRESHOLD_LPM    600
-#define TEMP_HIGH_RECOVERY_LPM     460
+#define TEMP_HIGH_THRESHOLD_LPM    580
+#define TEMP_HIGH_RECOVERY_LPM     530
 #define TEMP_LOW_THRESHOLD_LPM     (-50)
 #define TEMP_LOW_RECOVERY_LPM      0
 #elif defined(CONFIG_SEC_MEGA2_PROJECT)
@@ -391,6 +391,17 @@ static void * samsung_battery_data;
 #define TEMP_HIGH_RECOVERY_LPM     460
 #define TEMP_LOW_THRESHOLD_LPM     (-50)
 #define TEMP_LOW_RECOVERY_LPM      0
+#endif
+#if defined(CONFIG_BATTERY_SWELLING)
+#define BATT_SWELLING_HIGH_TEMP_BLOCK			500
+#define BATT_SWELLING_HIGH_TEMP_RECOV			450
+#define BATT_SWELLING_LOW_TEMP_BLOCK			50
+#define BATT_SWELLING_LOW_TEMP_RECOV			100
+#define BATT_SWELLING_HIGH_CHG_CURRENT			0
+#define BATT_SWELLING_LOW_CHG_CURRENT			0
+#define BATT_SWELLING_DROP_FLOAT_VOLTAGE		4200
+#define BATT_SWELLING_HIGH_RECHG_VOLTAGE		4150
+#define BATT_SWELLING_LOW_RECHG_VOLTAGE			4050
 #endif
 
 #if defined(CONFIG_MACH_AFYONLTE_TMO) || defined(CONFIG_MACH_AFYONLTE_CAN) || defined(CONFIG_MACH_AFYONLTE_MTR)
@@ -1165,10 +1176,13 @@ if(system_rev<=1)
 #if defined(CONFIG_BATTERY_SWELLING)
 	battery->pdata->swelling_high_temp_block = BATT_SWELLING_HIGH_TEMP_BLOCK;
 	battery->pdata->swelling_high_temp_recov = BATT_SWELLING_HIGH_TEMP_RECOV;
-	battery->pdata->swelling_low_temp_blck = BATT_SWELLING_LOW_TEMP_BLOCK;
+	battery->pdata->swelling_low_temp_block = BATT_SWELLING_LOW_TEMP_BLOCK;
 	battery->pdata->swelling_low_temp_recov = BATT_SWELLING_LOW_TEMP_RECOV;
-	battery->pdata->swelling_rechg_voltage = BATT_SWELLING_RECHG_VOLTAGE;
-	battery->pdata->swelling_block_time = BATT_SWELLING_BLOCK_TIME;
+	battery->pdata->swelling_high_chg_current = BATT_SWELLING_HIGH_CHG_CURRENT;
+	battery->pdata->swelling_low_chg_current = BATT_SWELLING_LOW_CHG_CURRENT;
+	battery->pdata->swelling_drop_float_voltage = BATT_SWELLING_DROP_FLOAT_VOLTAGE;
+	battery->pdata->swelling_high_rechg_voltage = BATT_SWELLING_HIGH_RECHG_VOLTAGE;
+	battery->pdata->swelling_low_rechg_voltage = BATT_SWELLING_LOW_RECHG_VOLTAGE;
 #endif
 	adc_init_type(pdev, battery);
 }

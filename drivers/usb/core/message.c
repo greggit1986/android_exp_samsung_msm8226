@@ -254,7 +254,7 @@ static void sg_clean(struct usb_sg_request *io)
 {
 	if (io->urbs) {
 		while (io->entries--)
-			usb_free_urb(io->urbs [io->entries]);
+			usb_free_urb(io->urbs[io->entries]);
 		kfree(io->urbs);
 		io->urbs = NULL;
 	}
@@ -302,10 +302,11 @@ static void sg_complete(struct urb *urb)
 		 */
 		spin_unlock(&io->lock);
 		for (i = 0, found = 0; i < io->entries; i++) {
-			if (!io->urbs [i] || !io->urbs [i]->dev)
+			if (!io->urbs[i])
 				continue;
 			if (found) {
-				retval = usb_unlink_urb(io->urbs [i]);
+				usb_block_urb(io->urbs[i]);
+				retval = usb_unlink_urb(io->urbs[i]);
 				if (retval != -EINPROGRESS &&
 				    retval != -ENODEV &&
 				    retval != -EBUSY &&
@@ -313,7 +314,7 @@ static void sg_complete(struct urb *urb)
 					dev_err(&io->dev->dev,
 						"%s, unlink --> %d\n",
 						__func__, retval);
-			} else if (urb == io->urbs [i])
+			} else if (urb == io->urbs[i])
 				found = 1;
 		}
 		spin_lock(&io->lock);
@@ -513,12 +514,10 @@ void usb_sg_wait(struct usb_sg_request *io)
 		int retval;
 
 		io->urbs[i]->dev = io->dev;
-		retval = usb_submit_urb(io->urbs [i], GFP_ATOMIC);
-
-		/* after we submit, let completions or cancelations fire;
-		 * we handshake using io->status.
-		 */
 		spin_unlock_irq(&io->lock);
+
+		retval = usb_submit_urb(io->urbs[i], GFP_NOIO);
+
 		switch (retval) {
 			/* maybe we retrying will recover */
 		case -ENXIO:	/* hc didn't queue this one */
@@ -576,30 +575,34 @@ EXPORT_SYMBOL_GPL(usb_sg_wait);
 void usb_sg_cancel(struct usb_sg_request *io)
 {
 	unsigned long flags;
+	int i, retval;
 
 	spin_lock_irqsave(&io->lock, flags);
-
-	/* shut everything down, if it didn't already */
-	if (!io->status) {
-		int i;
-
-		io->status = -ECONNRESET;
-		spin_unlock(&io->lock);
-		for (i = 0; i < io->entries; i++) {
-			int retval;
-
-			if (!io->urbs [i]->dev)
-				continue;
-			retval = usb_unlink_urb(io->urbs [i]);
-			if (retval != -EINPROGRESS
-					&& retval != -ENODEV
-					&& retval != -EBUSY
-					&& retval != -EIDRM)
-				dev_warn(&io->dev->dev, "%s, unlink --> %d\n",
-					__func__, retval);
-		}
-		spin_lock(&io->lock);
+	if (io->status || io->count == 0) {
+		spin_unlock_irqrestore(&io->lock, flags);
+		return;
 	}
+	/* shut everything down */
+	io->status = -ECONNRESET;
+	io->count++;		/* Keep the request alive until we're done */
+	spin_unlock_irqrestore(&io->lock, flags);
+
+	for (i = io->entries - 1; i >= 0; --i) {
+		usb_block_urb(io->urbs[i]);
+
+		retval = usb_unlink_urb(io->urbs[i]);
+		if (retval != -EINPROGRESS
+		    && retval != -ENODEV
+		    && retval != -EBUSY
+		    && retval != -EIDRM)
+			dev_warn(&io->dev->dev, "%s, unlink --> %d\n",
+				 __func__, retval);
+	}
+
+	spin_lock_irqsave(&io->lock, flags);
+	io->count--;
+	if (!io->count)
+		complete(&io->complete);
 	spin_unlock_irqrestore(&io->lock, flags);
 }
 EXPORT_SYMBOL_GPL(usb_sg_cancel);
@@ -816,9 +819,11 @@ int usb_string(struct usb_device *dev, int index, char *buf, size_t size)
 
 	if (dev->state == USB_STATE_SUSPENDED)
 		return -EHOSTUNREACH;
-	if (size <= 0 || !buf || !index)
+	if (size <= 0 || !buf)
 		return -EINVAL;
 	buf[0] = 0;
+	if (index <= 0 || index >= 256)
+		return -EINVAL;
 	tbuf = kmalloc(256, GFP_NOIO);
 	if (!tbuf)
 		return -ENOMEM;
@@ -1771,30 +1776,6 @@ free_interfaces:
 		goto free_interfaces;
 	}
 
-	dev->actconfig = cp;
-	if (cp)
-		usb_notify_config_device(dev);
-	ret = usb_control_msg(dev, usb_sndctrlpipe(dev, 0),
-			      USB_REQ_SET_CONFIGURATION, 0, configuration, 0,
-			      NULL, 0, USB_CTRL_SET_TIMEOUT);
-	if (ret < 0) {
-		/* All the old state is gone, so what else can we do?
-		 * The device is probably useless now anyway.
-		 */
-		dev->actconfig = cp = NULL;
-	}
-
-	if (!cp) {
-		usb_notify_config_device(dev);
-		usb_set_device_state(dev, USB_STATE_ADDRESS);
-		usb_hcd_alloc_bandwidth(dev, NULL, NULL, NULL);
-		mutex_unlock(hcd->bandwidth_mutex);
-		usb_autosuspend_device(dev);
-		goto free_interfaces;
-	}
-	mutex_unlock(hcd->bandwidth_mutex);
-	usb_set_device_state(dev, USB_STATE_CONFIGURED);
-
 	/* Initialize the new interface structures and the
 	 * hc/hcd/usbcore interface/endpoint state.
 	 */
@@ -1807,7 +1788,6 @@ free_interfaces:
 		intfc = cp->intf_cache[i];
 		intf->altsetting = intfc->altsetting;
 		intf->num_altsetting = intfc->num_altsetting;
-		intf->intf_assoc = find_iad(dev, cp, i);
 		kref_get(&intfc->ref);
 
 		alt = usb_altnum_to_altsetting(intf, 0);
@@ -1820,6 +1800,8 @@ free_interfaces:
 		if (!alt)
 			alt = &intf->altsetting[0];
 
+		intf->intf_assoc =
+			find_iad(dev, cp, alt->desc.bInterfaceNumber);
 		intf->cur_altsetting = alt;
 		usb_enable_interface(dev, intf, true);
 		intf->dev.parent = &dev->dev;
@@ -1837,6 +1819,38 @@ free_interfaces:
 			configuration, alt->desc.bInterfaceNumber);
 	}
 	kfree(new_interfaces);
+
+	dev->actconfig = cp;
+	if (cp)
+		usb_notify_config_device(dev);
+	ret = usb_control_msg(dev, usb_sndctrlpipe(dev, 0),
+			      USB_REQ_SET_CONFIGURATION, 0, configuration, 0,
+			      NULL, 0, USB_CTRL_SET_TIMEOUT);
+	if (ret < 0 && cp) {
+		/*
+		 * All the old state is gone, so what else can we do?
+		 * The device is probably useless now anyway.
+		 */
+		usb_hcd_alloc_bandwidth(dev, NULL, NULL, NULL);
+		for (i = 0; i < nintf; ++i) {
+			usb_disable_interface(dev, cp->interface[i], true);
+			put_device(&cp->interface[i]->dev);
+			cp->interface[i] = NULL;
+		}
+		dev->actconfig = cp = NULL;
+	}
+
+	mutex_unlock(hcd->bandwidth_mutex);
+
+	if (!cp) {
+		usb_notify_config_device(dev);
+		usb_set_device_state(dev, USB_STATE_ADDRESS);
+
+		/* Leave LPM disabled while the device is unconfigured. */
+		usb_autosuspend_device(dev);
+		return ret;
+	}
+	usb_set_device_state(dev, USB_STATE_CONFIGURED);
 
 	if (cp->string == NULL &&
 			!(dev->quirks & USB_QUIRK_CONFIG_INTF_STRINGS))

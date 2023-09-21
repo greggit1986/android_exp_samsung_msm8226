@@ -42,7 +42,7 @@
 
 #define CALIBRATION_FILE_PATH           "/efs/accel_calibration_data"
 #define CALIBRATION_DATA_AMOUNT         20
-#define MAX_ACCEL_1G			1024
+#define MAX_ACCEL_1G                    1024
 
 #define BMA255_DEFAULT_DELAY            200000000LL
 #define BMA255_CHIP_ID                  0xFA
@@ -445,22 +445,32 @@ static void bma255_work_func(struct work_struct *work)
 	struct timespec ts;
 	int time_hi, time_lo;
 
-	ts = ktime_to_timespec(ktime_get_boottime());
+	//JJEDIT ts = ktime_to_timespec(alarm_get_elapsed_realtime());
 	data->timestamp = ts.tv_sec * 1000000000ULL + ts.tv_nsec;
 	time_lo = (int)(data->timestamp & TIME_LO_MASK);
 	time_hi = (int)((data->timestamp & TIME_HI_MASK) >> TIME_HI_SHIFT);
 
 	ret = bma255_read_accel_xyz(data, &acc);
-	if (ret < 0)
+	if (ret < 0){
+		pr_err("read accel data failed\n");
 		goto exit;
+	}
 
-	data->accdata.x = acc.x - data->caldata.x;
-	data->accdata.y = acc.y - data->caldata.y;
-	data->accdata.z = acc.z - data->caldata.z;
+	data->accdata = acc;
+	acc.x = acc.x - data->caldata.x;
+	acc.y = acc.y - data->caldata.y;
+	acc.z = acc.z - data->caldata.z;
 
-	input_report_rel(data->input, REL_X, data->accdata.x);
-	input_report_rel(data->input, REL_Y, data->accdata.y);
-	input_report_rel(data->input, REL_Z, data->accdata.z);
+	// 0 value is ignored using input_report_rel.
+	acc.x = (acc.x >= 0) ? (acc.x + 1) : (acc.x - 1);
+	acc.y = (acc.y >= 0) ? (acc.y + 1) : (acc.y - 1);
+	acc.z = (acc.z >= 0) ? (acc.z + 1) : (acc.z - 1);
+	time_hi = (time_hi >= 0) ? (time_hi + 1) : (time_hi - 1);
+	time_lo = (time_lo >= 0) ? (time_lo + 1) : (time_lo - 1);
+
+	input_report_rel(data->input, REL_X, acc.x);
+	input_report_rel(data->input, REL_Y, acc.y);
+	input_report_rel(data->input, REL_Z, acc.z);
 	input_report_rel(data->input, REL_DIAL, time_hi);
 	input_report_rel(data->input, REL_MISC, time_lo);
 	input_sync(data->input);
@@ -668,7 +678,7 @@ static int bma255_do_calibrate(struct bma255_p *data, int enable)
 		else
 			bma255_set_mode(data, BMA255_MODE_NORMAL);
 
-		msleep(300);
+		usleep_range(300000, 301000);
 
 		for (cnt = 0; cnt < CALIBRATION_DATA_AMOUNT; cnt++) {
 			bma255_read_accel_xyz(data, &acc);

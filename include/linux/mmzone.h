@@ -158,6 +158,7 @@ enum zone_stat_item {
 	NR_CMA_ACTIVE_FILE,
 	NR_CMA_UNEVICTABLE,
 #endif
+	NR_SWAPCACHE,
 	NR_VM_ZONE_STAT_ITEMS };
 
 /*
@@ -713,7 +714,7 @@ typedef struct pglist_data {
 					     range, including holes */
 	int node_id;
 	wait_queue_head_t kswapd_wait;
-	struct task_struct *kswapd;
+	struct task_struct *kswapd;	/* Protected by lock_memory_hotplug() */
 	int kswapd_max_order;
 	enum zone_type classzone_idx;
 } pg_data_t;

@@ -1001,7 +1001,10 @@ static struct msm_gpiomux_config msm_sensor_configs[] __initdata = {
 		},
 	},
 
-#elif defined(CONFIG_MACH_AFYONLTE_TMO) || defined(CONFIG_MACH_AFYONLTE_CAN)
+/* #elif defined(CONFIG_MACH_AFYONLTE_TMO) || defined(CONFIG_MACH_AFYONLTE_CAN) */
+/* JJEDITSTART - FOR MTR */
+#elif defined(CONFIG_MACH_AFYONLTE_TMO) || defined(CONFIG_MACH_AFYONLTE_CAN) || defined(CONFIG_MACH_AFYONLTE_MTR)
+/* JJEDITEND - FOR MTR */
 	{
 		.gpio = 26, /* CAM_MCLK */
 		.settings = {

@@ -1,7 +1,7 @@
 /*
  * Driver O/S-independent utility routines
  *
- * Copyright (C) 1999-2015, Broadcom Corporation
+ * Copyright (C) 1999-2016, Broadcom Corporation
  * 
  *      Unless you and Broadcom execute a separate written software license
  * agreement governing use of this software, this software is licensed to you
@@ -20,7 +20,7 @@
  *      Notwithstanding the above, under no circumstances may you combine this
  * software in any way with any other Broadcom software provided under a license
  * other than the GPL, without Broadcom's express prior written consent.
- * $Id: bcmutils.c 529304 2015-01-27 04:26:56Z $
+ * $Id: bcmutils.c 613265 2016-01-18 11:36:02Z $
  */
 
 #include <bcm_cfg.h>
@@ -262,10 +262,11 @@ pktq_penq(struct pktq *pq, int prec, void *p)
 	struct pktq_prec *q;
 
 	ASSERT(prec >= 0 && prec < pq->num_prec);
-	ASSERT(PKTLINK(p) == NULL);         /* queueing chains not allowed */
-
+	/* queueing chains not allowed and no segmented SKB (Kernel-3.18.y) */
+	ASSERT(!((PKTLINK(p) != NULL) && (PKTLINK(p) != p)));
 	ASSERT(!pktq_full(pq));
 	ASSERT(!pktq_pfull(pq, prec));
+	PKTSETLINK(p, NULL);
 
 	q = &pq->q[prec];
 
@@ -291,10 +292,12 @@ pktq_penq_head(struct pktq *pq, int prec, void *p)
 	struct pktq_prec *q;
 
 	ASSERT(prec >= 0 && prec < pq->num_prec);
-	ASSERT(PKTLINK(p) == NULL);         /* queueing chains not allowed */
+	/* queueing chains not allowed and no segmented SKB (Kernel-3.18.y) */
+	ASSERT(!((PKTLINK(p) != NULL) && (PKTLINK(p) != p)));
 
 	ASSERT(!pktq_full(pq));
 	ASSERT(!pktq_pfull(pq, prec));
+	PKTSETLINK(p, NULL);
 
 	q = &pq->q[prec];
 
@@ -1265,6 +1268,11 @@ pktsetprio(void *pkt, bool update_vtag)
 			evh->vlan_tag = hton16(vlan_tag);
 			rc |= PKTPRIO_UPD;
 		}
+#ifdef DHD_LOSSLESS_ROAMING
+	} else if (eh->ether_type == hton16(ETHER_TYPE_802_1X)) {
+		priority = PRIO_8021D_NC;
+		rc = PKTPRIO_DSCP;
+#endif /* DHD_LOSSLESS_ROAMING */
 	} else if (eh->ether_type == hton16(ETHER_TYPE_IP)) {
 		uint8 *ip_body = pktdata + sizeof(struct ether_header);
 		uint8 tos_tc = IP_TOS46(ip_body);

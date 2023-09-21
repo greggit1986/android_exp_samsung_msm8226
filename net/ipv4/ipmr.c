@@ -124,6 +124,8 @@ static DEFINE_SPINLOCK(mfc_unres_lock);
 static struct kmem_cache *mrt_cachep __read_mostly;
 
 static struct mr_table *ipmr_new_table(struct net *net, u32 id);
+static void ipmr_free_table(struct mr_table *mrt);
+
 static int ip_mr_forward(struct net *net, struct mr_table *mrt,
 			 struct sk_buff *skb, struct mfc_cache *cache,
 			 int local);
@@ -131,6 +133,7 @@ static int ipmr_cache_report(struct mr_table *mrt,
 			     struct sk_buff *pkt, vifi_t vifi, int assert);
 static int __ipmr_fill_mroute(struct mr_table *mrt, struct sk_buff *skb,
 			      struct mfc_cache *c, struct rtmsg *rtm);
+static void mroute_clean_tables(struct mr_table *mrt);
 static void ipmr_expire_process(unsigned long arg);
 
 #ifdef CONFIG_IP_MROUTE_MULTIPLE_TABLES
@@ -151,9 +154,12 @@ static struct mr_table *ipmr_get_table(struct net *net, u32 id)
 static int ipmr_fib_lookup(struct net *net, struct flowi4 *flp4,
 			   struct mr_table **mrt)
 {
-	struct ipmr_result res;
-	struct fib_lookup_arg arg = { .result = &res, };
 	int err;
+	struct ipmr_result res;
+	struct fib_lookup_arg arg = {
+		.result = &res,
+		.flags = FIB_LOOKUP_NOREF,
+	};
 
 	err = fib_rules_lookup(net->ipv4.mr_rules_ops,
 			       flowi4_to_flowi(flp4), 0, &arg);
@@ -271,7 +277,7 @@ static void __net_exit ipmr_rules_exit(struct net *net)
 
 	list_for_each_entry_safe(mrt, next, &net->ipv4.mr_tables, list) {
 		list_del(&mrt->list);
-		kfree(mrt);
+		ipmr_free_table(mrt);
 	}
 	fib_rules_unregister(net->ipv4.mr_rules_ops);
 }
@@ -299,7 +305,7 @@ static int __net_init ipmr_rules_init(struct net *net)
 
 static void __net_exit ipmr_rules_exit(struct net *net)
 {
-	kfree(net->ipv4.mrt);
+	ipmr_free_table(net->ipv4.mrt);
 }
 #endif
 
@@ -334,6 +340,13 @@ static struct mr_table *ipmr_new_table(struct net *net, u32 id)
 	list_add_tail_rcu(&mrt->list, &net->ipv4.mr_tables);
 #endif
 	return mrt;
+}
+
+static void ipmr_free_table(struct mr_table *mrt)
+{
+	del_timer_sync(&mrt->ipmr_expire_timer);
+	mroute_clean_tables(mrt);
+	kfree(mrt);
 }
 
 /* Service routines creating virtual interfaces: DVMRP tunnels and PIMREG */
@@ -438,7 +451,7 @@ static netdev_tx_t reg_vif_xmit(struct sk_buff *skb, struct net_device *dev)
 	struct mr_table *mrt;
 	struct flowi4 fl4 = {
 		.flowi4_oif	= dev->ifindex,
-		.flowi4_iif	= skb->skb_iif,
+		.flowi4_iif	= skb->skb_iif ? : LOOPBACK_IFINDEX,
 		.flowi4_mark	= skb->mark,
 	};
 	int err;
@@ -1198,23 +1211,24 @@ int ip_mroute_setsockopt(struct sock *sk, int optname, char __user *optval, unsi
 	struct net *net = sock_net(sk);
 	struct mr_table *mrt;
 
+	if (sk->sk_type != SOCK_RAW ||
+	    inet_sk(sk)->inet_num != IPPROTO_IGMP)
+		return -EOPNOTSUPP;
+
 	mrt = ipmr_get_table(net, raw_sk(sk)->ipmr_table ? : RT_TABLE_DEFAULT);
 	if (mrt == NULL)
 		return -ENOENT;
 
 	if (optname != MRT_INIT) {
 		if (sk != rcu_access_pointer(mrt->mroute_sk) &&
-		    !capable(CAP_NET_ADMIN))
+		    !ns_capable(net->user_ns, CAP_NET_ADMIN))
 			return -EACCES;
 	}
 
 	switch (optname) {
 	case MRT_INIT:
-		if (sk->sk_type != SOCK_RAW ||
-		    inet_sk(sk)->inet_num != IPPROTO_IGMP)
-			return -EOPNOTSUPP;
 		if (optlen != sizeof(int))
-			return -ENOPROTOOPT;
+			return -EINVAL;
 
 		rtnl_lock();
 		if (rtnl_dereference(mrt->mroute_sk)) {
@@ -1275,9 +1289,11 @@ int ip_mroute_setsockopt(struct sock *sk, int optname, char __user *optval, unsi
 	case MRT_ASSERT:
 	{
 		int v;
+		if (optlen != sizeof(v))
+			return -EINVAL;
 		if (get_user(v, (int __user *)optval))
 			return -EFAULT;
-		mrt->mroute_do_assert = (v) ? 1 : 0;
+		mrt->mroute_do_assert = !!v;
 		return 0;
 	}
 #ifdef CONFIG_IP_PIMSM
@@ -1285,9 +1301,11 @@ int ip_mroute_setsockopt(struct sock *sk, int optname, char __user *optval, unsi
 	{
 		int v;
 
+		if (optlen != sizeof(v))
+			return -EINVAL;
 		if (get_user(v, (int __user *)optval))
 			return -EFAULT;
-		v = (v) ? 1 : 0;
+		v = !!v;
 
 		rtnl_lock();
 		ret = 0;
@@ -1316,7 +1334,8 @@ int ip_mroute_setsockopt(struct sock *sk, int optname, char __user *optval, unsi
 		} else {
 			if (!ipmr_new_table(net, v))
 				ret = -ENOMEM;
-			raw_sk(sk)->ipmr_table = v;
+			else
+				raw_sk(sk)->ipmr_table = v;
 		}
 		rtnl_unlock();
 		return ret;
@@ -1341,6 +1360,10 @@ int ip_mroute_getsockopt(struct sock *sk, int optname, char __user *optval, int 
 	int val;
 	struct net *net = sock_net(sk);
 	struct mr_table *mrt;
+
+	if (sk->sk_type != SOCK_RAW ||
+	    inet_sk(sk)->inet_num != IPPROTO_IGMP)
+		return -EOPNOTSUPP;
 
 	mrt = ipmr_get_table(net, raw_sk(sk)->ipmr_table ? : RT_TABLE_DEFAULT);
 	if (mrt == NULL)
@@ -1544,7 +1567,8 @@ static struct notifier_block ip_mr_notifier = {
  *	important for multicast video.
  */
 
-static void ip_encap(struct sk_buff *skb, __be32 saddr, __be32 daddr)
+static void ip_encap(struct net *net, struct sk_buff *skb,
+		     __be32 saddr, __be32 daddr)
 {
 	struct iphdr *iph;
 	const struct iphdr *old_iph = ip_hdr(skb);
@@ -1563,7 +1587,7 @@ static void ip_encap(struct sk_buff *skb, __be32 saddr, __be32 daddr)
 	iph->protocol	=	IPPROTO_IPIP;
 	iph->ihl	=	5;
 	iph->tot_len	=	htons(skb->len);
-	ip_select_ident(iph, skb_dst(skb), NULL);
+	ip_select_ident(net, skb, NULL);
 	ip_send_check(iph);
 
 	memset(&(IPCB(skb)->opt), 0, sizeof(IPCB(skb)->opt));
@@ -1659,7 +1683,7 @@ static void ipmr_queue_xmit(struct net *net, struct mr_table *mrt,
 	 * What do we do with netfilter? -- RR
 	 */
 	if (vif->flags & VIFF_TUNNEL) {
-		ip_encap(skb, vif->local, vif->remote);
+		ip_encap(net, skb, vif->local, vif->remote);
 		/* FIXME: extra output firewall step used to be here. --RR */
 		vif->dev->stats.tx_packets++;
 		vif->dev->stats.tx_bytes += skb->len;

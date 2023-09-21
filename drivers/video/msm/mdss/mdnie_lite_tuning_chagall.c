@@ -139,11 +139,13 @@ const char outdoor_name[MAX_OUTDOOR_MODE][20] = {
 	"OUTDOOR_ON_MODE",
 };
 
-const char accessibility_name[ACCESSIBILITY_MAX][20] = {
+const char accessibility_name[ACCESSIBILITY_MAX][25] = {
 	"ACCESSIBILITY_OFF",
 	"NEGATIVE_MODE",
 	"COLOR_BLIND_MODE",
 	"SCREEN_CURTAIN_MODE",
+	"GRAYSCALE_MODE",
+	"GRAYSCALE_NEGATIVE_MODE",
 };
 
 void print_tun_data(void)
@@ -266,7 +268,7 @@ void mDNIe_Set_Mode(void)
 		INPUT_PAYLOAD2(blind_tune_value[mdnie_tun_state.accessibility][1]);
 	}
 
-	else if (mdnie_msd->dstat.auto_brightness == 6) {
+	else if (mdnie_msd->dstat.auto_brightness >= 6 && mdnie_msd->dstat.bright_level == 255) {
 		DPRINT("[LOCAL CE] HBM mode! only LOCAL CE tuning\n");
 		if((mdnie_tun_state.scenario == mDNIe_BROWSER_MODE)||(mdnie_tun_state.scenario == mDNIe_eBOOK_MODE)) {
 			INPUT_PAYLOAD1(LOCAL_CE_TEXT_1);
@@ -670,6 +672,10 @@ static ssize_t accessibility_store(struct device *dev,
 				buffer, MDNIE_COLOR_BLINDE_CMD);
 	} else if (cmd_value == SCREEN_CURTAIN) {
 		mdnie_tun_state.accessibility = SCREEN_CURTAIN;
+	} else if (cmd_value == GRAYSCALE) {
+		mdnie_tun_state.accessibility = GRAYSCALE;
+	} else if (cmd_value == GRAYSCALE_NEGATIVE) {
+		mdnie_tun_state.accessibility = GRAYSCALE_NEGATIVE;
 	} else if (cmd_value == ACCESSIBILITY_OFF) {
 		mdnie_tun_state.accessibility = ACCESSIBILITY_OFF;
 	} else
@@ -737,7 +743,11 @@ static DEVICE_ATTR(sensorRGB, 0664, sensorRGB_show, sensorRGB_store);
 #define MAX_FILE_NAME	128
 #define TUNING_FILE_PATH "/sdcard/"
 static char tuning_file[MAX_FILE_NAME];
-
+#if 0
+/* 
+ * Do not use below code but only for Image Quality Debug in Developing Precess.
+ * Do not comment in this code Because there are contained vulnerability.
+ */
 static char char_to_dec(char data1, char data2)
 {
 	char dec;
@@ -819,7 +829,7 @@ static void load_tuning_file(char *filename)
 	filp = filp_open(filename, O_RDONLY, 0);
 	if (IS_ERR(filp)) {
 		printk(KERN_ERR "%s File open failed\n", __func__);
-		return;
+		goto err;
 	}
 
 	l = filp->f_path.dentry->d_inode->i_size;
@@ -829,7 +839,7 @@ static void load_tuning_file(char *filename)
 	if (dp == NULL) {
 		pr_info("Can't not alloc memory for tuning file load\n");
 		filp_close(filp, current->files);
-		return;
+		goto err;
 	}
 	pos = 0;
 	memset(dp, 0, l);
@@ -842,7 +852,7 @@ static void load_tuning_file(char *filename)
 		pr_info("vfs_read() filed ret : %d\n", ret);
 		kfree(dp);
 		filp_close(filp, current->files);
-		return;
+		goto err;
 	}
 
 	filp_close(filp, current->files);
@@ -852,7 +862,12 @@ static void load_tuning_file(char *filename)
 	sending_tune_cmd(dp, l);
 
 	kfree(dp);
+
+	return;
+err:
+	set_fs(fs);
 }
+#endif
 
 static ssize_t tuning_show(struct device *dev,
 			struct device_attribute *attr, char *buf)
@@ -867,7 +882,16 @@ static ssize_t tuning_show(struct device *dev,
 static ssize_t tuning_store(struct device *dev,
 			struct device_attribute *attr, const char *buf, size_t size)
 {
+/* 
+ * Do not use below code but only for Image Quality Debug in Developing Precess.
+ * Do not comment in this code Because there are contained vulnerability.
+ */
+/*
 	char *pt;
+
+	if (buf == NULL || strchr(buf, '.') || strchr(buf, '/'))
+		return size;
+
 	memset(tuning_file, 0, sizeof(tuning_file));
 	snprintf(tuning_file, MAX_FILE_NAME, "%s%s", TUNING_FILE_PATH, buf);
 
@@ -883,7 +907,7 @@ static ssize_t tuning_store(struct device *dev,
 	DPRINT("%s\n", tuning_file);
 
 	load_tuning_file(tuning_file);
-
+*/
 	return size;
 }
 static DEVICE_ATTR(tuning, S_IRUGO | S_IWUSR | S_IWGRP,

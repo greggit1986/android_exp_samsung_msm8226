@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -99,6 +99,7 @@ struct diag_dci_buf_peripheral_t {
 };
 
 struct diag_dci_client_tbl {
+	int tgid;
 	struct diag_dci_reg_tbl_t client_info;
 	struct task_struct *client;
 	unsigned char *dci_log_mask;
@@ -127,6 +128,13 @@ struct diag_log_event_stats {
 	uint16_t code;
 	int is_set;
 };
+
+struct diag_dci_pkt_rsp_header_t {
+	int type;
+	int length;
+	uint8_t delete_flag;
+	int uid;
+} __packed;
 
 struct diag_dci_pkt_header_t {
 	uint8_t start;

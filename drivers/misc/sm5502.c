@@ -1019,6 +1019,9 @@ static void muic_update_jig_state(struct sm5502_usbsw *usbsw, int dev_type2, int
 		usbsw->attached_dev = ATTACHED_DEV_JIG_USB_ON_MUIC;
 }
 
+#if defined CONFIG_ID_BYPASS_SBL
+int otg_attached = 0;
+#endif
 
 static int sm5502_attach_dev(struct sm5502_usbsw *usbsw)
 {
@@ -1026,6 +1029,11 @@ static int sm5502_attach_dev(struct sm5502_usbsw *usbsw)
 	int val1, val2, val3, val4, vbus;
 	struct sm5502_platform_data *pdata = usbsw->pdata;
 	struct i2c_client *client = usbsw->client;
+#if defined(CONFIG_USB_HOST_NOTIFY)
+#if defined(CONFIG_SEC_ATLANTIC_PROJECT) || defined(CONFIG_MACH_S3VE3G_EUR)
+	struct regulator *otg_regulator = regulator_get(NULL, "8226_smbbp_otg");
+#endif
+#endif
 #if defined(CONFIG_VIDEO_MHL_V2)
 	/*u8 mhl_ret = 0;*/
 #endif
@@ -1144,7 +1152,9 @@ static int sm5502_attach_dev(struct sm5502_usbsw *usbsw)
 	} else if (val1 & DEV_USB_OTG && adc == ADC_OTG) {
 		pr_info("[MUIC] OTG Connected\n");
 		usbsw->attached_dev = ATTACHED_DEV_OTG_MUIC;
-
+#if defined CONFIG_ID_BYPASS_SBL
+		otg_attached = 1;
+#endif
 #if defined(CONFIG_MUIC_SM5502_SUPPORT_LANHUB_TA)
 		sm5502_enable_rawdataInterrupts(usbsw);
 		usbsw->dock_attached = SM5502_ATTACHED;
@@ -1152,6 +1162,11 @@ static int sm5502_attach_dev(struct sm5502_usbsw *usbsw)
 #endif
 		sm5502_set_otg(usbsw, SM5502_ATTACHED);
 		pdata->callback(CABLE_TYPE_OTG, SM5502_ATTACHED);
+#if defined(CONFIG_SEC_ATLANTIC_PROJECT) || defined(CONFIG_MACH_S3VE3G_EUR)
+		if (!regulator_is_enabled(otg_regulator)) {
+			regulator_enable(otg_regulator);
+		}
+#endif
 #endif
 	/* JIG */
 	} else if (val2 & DEV_T2_USB_MASK) {
@@ -1228,11 +1243,13 @@ static int sm5502_attach_dev(struct sm5502_usbsw *usbsw)
 		sm5502_detect_lanhub(usbsw);
 		}
 #endif
+#if defined(CONFIG_MUIC_SUPPORT_CHARGING_CABLE)
 	/* Charging Cable */
     } else if ((val2 & DEV_PPD) && (adc == ADC_CHARGING_CABLE)) {
         pr_info("[MUIC] Phone Charging cable Connected\n");
         pdata->callback(CABLE_TYPE_CHARGING_CABLE,
                 SM5502_ATTACHED);
+#endif
 	/* Incompatible */
     } else if (vbus & DEV_VBUSIN_VALID) {
         pr_info("[MUIC] Incompatible Charger Connected\n");
@@ -1263,6 +1280,11 @@ static int sm5502_attach_dev(struct sm5502_usbsw *usbsw)
 static int sm5502_detach_dev(struct sm5502_usbsw *usbsw)
 {
 	struct sm5502_platform_data *pdata = usbsw->pdata;
+#if defined(CONFIG_USB_HOST_NOTIFY)
+#if defined(CONFIG_SEC_ATLANTIC_PROJECT) || defined(CONFIG_MACH_S3VE3G_EUR)
+	struct regulator *otg_regulator = regulator_get(NULL, "8226_smbbp_otg");
+#endif
+#endif
 #if defined(CONFIG_TOUCHSCREEN_MMS144)
 	int tsp_noti_ignore = 0;
 
@@ -1314,6 +1336,9 @@ static int sm5502_detach_dev(struct sm5502_usbsw *usbsw)
 	/* for SAMSUNG OTG */
 	} else if (usbsw->dev1 & DEV_USB_OTG) {
 		pr_info("[MUIC] OTG Disconnected\n");
+#if defined CONFIG_ID_BYPASS_SBL
+		otg_attached = 0;
+#endif
 #if defined(CONFIG_MUIC_SM5502_SUPPORT_LANHUB_TA)
 		sm5502_disable_rawdataInterrupts(usbsw);
 		pr_info("%s:lanhub_ta_status(%d)\n",
@@ -1330,6 +1355,11 @@ static int sm5502_detach_dev(struct sm5502_usbsw *usbsw)
 #else
 		sm5502_set_otg(usbsw, SM5502_DETACHED);
 		pdata->callback(CABLE_TYPE_OTG, SM5502_DETACHED);
+#endif
+#if defined(CONFIG_SEC_ATLANTIC_PROJECT) || defined(CONFIG_MACH_S3VE3G_EUR)
+		if (regulator_is_enabled(otg_regulator)) {
+			regulator_disable(otg_regulator);
+		}
 #endif
 #endif
 	/* JIG */
@@ -1409,12 +1439,14 @@ static int sm5502_detach_dev(struct sm5502_usbsw *usbsw)
 		usbsw->dock_attached = SM5502_DETACHED;
 
 #endif
+#if defined(CONFIG_MUIC_SUPPORT_CHARGING_CABLE)
 	/* Charging Cable */
     } else if ((usbsw->dev2 & DEV_PPD) &&
 				(usbsw->adc == ADC_CHARGING_CABLE)) {
         pr_info("[MUIC] Phone Charging cable Disconnected\n");
         pdata->callback(CABLE_TYPE_CHARGING_CABLE,
                 SM5502_DETACHED);
+#endif
 	/* Incompatible */
 	} else if (usbsw->vbus & DEV_VBUSIN_VALID) {
 		pr_info("[MUIC] Incompatible Charger Disconnected\n");
@@ -1531,7 +1563,7 @@ static int sm5502_irq_init(struct sm5502_usbsw *usbsw)
 
 	if (client->irq) {
 		ret = request_threaded_irq(client->irq, NULL,
-			sm5502_irq_thread, IRQF_TRIGGER_FALLING,
+			sm5502_irq_thread, IRQF_TRIGGER_FALLING | IRQF_ONESHOT,
 			"sm5502 micro USB", usbsw);
 		if (ret) {
 			dev_err(&client->dev, "failed to reqeust IRQ\n");

@@ -404,8 +404,13 @@ static struct msm_gpiomux_config msm_blsp_configs[] __initdata = {
 			[GPIOMUX_SUSPENDED] = &rx_gpio_uart_config,
 		},
 	},
+/*#if !defined (CONFIG_SEC_MILLET_PROJECT) && !defined(CONFIG_SEC_MATISSE_PROJECT)
+#if !defined(CONFIG_MACH_AFYONLTE_TMO) && !defined(CONFIG_MACH_AFYONLTE_CAN)*/
+
+/* JJEDIT START - FOR MTR */
 #if !defined (CONFIG_SEC_MILLET_PROJECT) && !defined(CONFIG_SEC_MATISSE_PROJECT)
-#if !defined(CONFIG_MACH_AFYONLTE_TMO) && !defined(CONFIG_MACH_AFYONLTE_CAN)
+#if !defined(CONFIG_MACH_AFYONLTE_TMO) && !defined(CONFIG_MACH_AFYONLTE_CAN) && !defined(CONFIG_MACH_AFYONLTE_MTR)
+/* JJEDIT END - FOR MTR */
 	{
 		.gpio      = 0,		/* BLSP1 QUP1 SPI_DATA_MOSI */
 		.settings = {

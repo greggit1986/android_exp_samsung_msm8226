@@ -34,7 +34,6 @@
 #include <linux/earlysuspend.h>
 #endif
 #include <linux/of_gpio.h>
-#include <linux/alarmtimer.h>
 
 #include "buffer.h"
 #include "iio.h"

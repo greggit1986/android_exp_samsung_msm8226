@@ -1,10 +1,11 @@
 #!/bin/bash
 
 export ARCH=arm
-export CROSS_COMPILE=/opt/toolchains/arm-eabi-4.7/bin/arm-eabi-
+export CROSS_COMPILE=$(pwd)/arm-linux-androideabi-4.9/bin/arm-linux-androideabi-
+
 mkdir output
 
-make -C $(pwd) O=output VARIANT_DEFCONFIG=msm8926-sec_matisselte_defconfig msm8226-sec_defconfig SELINUX_DEFCONFIG=selinux_defconfig
-make -C $(pwd) O=output
+make -C $(pwd) O=output msm8226-sec_defconfig VARIANT_DEFCONFIG=msm8228-sec_atlantic3geur_defconfig SELINUX_DEFCONFIG=selinux_defconfig
+make -j64 -C $(pwd) O=output
 
 cp output/arch/arm/boot/Image $(pwd)/arch/arm/boot/zImage

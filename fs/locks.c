@@ -132,6 +132,7 @@
 #define IS_POSIX(fl)	(fl->fl_flags & FL_POSIX)
 #define IS_FLOCK(fl)	(fl->fl_flags & FL_FLOCK)
 #define IS_LEASE(fl)	(fl->fl_flags & FL_LEASE)
+#define IS_OFDLCK(fl)	(fl->fl_flags & FL_OFDLCK)
 
 static bool lease_breaking(struct file_lock *fl)
 {
@@ -308,7 +309,7 @@ static int flock_make_lock(struct file *filp, struct file_lock **lock,
 	return 0;
 }
 
-static int assign_type(struct file_lock *fl, int type)
+static int assign_type(struct file_lock *fl, long type)
 {
 	switch (type) {
 	case F_RDLCK:
@@ -445,7 +446,7 @@ static const struct lock_manager_operations lease_manager_ops = {
 /*
  * Initialize a lease, use the default lock manager operations
  */
-static int lease_init(struct file *filp, int type, struct file_lock *fl)
+static int lease_init(struct file *filp, long type, struct file_lock *fl)
  {
 	if (assign_type(fl, type) != 0)
 		return -EINVAL;
@@ -463,7 +464,7 @@ static int lease_init(struct file *filp, int type, struct file_lock *fl)
 }
 
 /* Allocate a file_lock initialised to this type of lease */
-static struct file_lock *lease_alloc(struct file *filp, int type)
+static struct file_lock *lease_alloc(struct file *filp, long type)
 {
 	struct file_lock *fl = locks_alloc_lock();
 	int error = -ENOMEM;
@@ -1253,11 +1254,10 @@ int __break_lease(struct inode *inode, unsigned int mode)
 
 restart:
 	break_time = flock->fl_break_time;
-	if (break_time != 0) {
+	if (break_time != 0)
 		break_time -= jiffies;
-		if (break_time == 0)
-			break_time++;
-	}
+	if (break_time == 0)
+		break_time++;
 	locks_insert_block(flock, new_fl);
 	unlock_flocks();
 	error = wait_event_interruptible_timeout(new_fl->fl_wait,
@@ -1465,7 +1465,7 @@ int generic_setlease(struct file *filp, long arg, struct file_lock **flp)
 	case F_WRLCK:
 		return generic_add_lease(filp, arg, flp);
 	default:
-		BUG();
+		return -EINVAL;
 	}
 }
 EXPORT_SYMBOL(generic_setlease);
@@ -1698,7 +1698,7 @@ EXPORT_SYMBOL_GPL(vfs_test_lock);
 
 static int posix_lock_to_flock(struct flock *flock, struct file_lock *fl)
 {
-	flock->l_pid = fl->fl_pid;
+	flock->l_pid = IS_OFDLCK(fl) ? -1 : fl->fl_pid;
 #if BITS_PER_LONG == 32
 	/*
 	 * Make sure we can represent the posix lock via
@@ -1720,7 +1720,7 @@ static int posix_lock_to_flock(struct flock *flock, struct file_lock *fl)
 #if BITS_PER_LONG == 32
 static void posix_lock_to_flock64(struct flock64 *flock, struct file_lock *fl)
 {
-	flock->l_pid = fl->fl_pid;
+	flock->l_pid = IS_OFDLCK(fl) ? -1 : fl->fl_pid;
 	flock->l_start = fl->fl_start;
 	flock->l_len = fl->fl_end == OFFSET_MAX ? 0 :
 		fl->fl_end - fl->fl_start + 1;
@@ -1732,7 +1732,7 @@ static void posix_lock_to_flock64(struct flock64 *flock, struct file_lock *fl)
 /* Report the first existing lock that would conflict with l.
  * This implements the F_GETLK command of fcntl().
  */
-int fcntl_getlk(struct file *filp, struct flock __user *l)
+int fcntl_getlk(struct file *filp, unsigned int cmd, struct flock __user *l)
 {
 	struct file_lock file_lock;
 	struct flock flock;
@@ -1748,6 +1748,12 @@ int fcntl_getlk(struct file *filp, struct flock __user *l)
 	error = flock_to_posix_lock(filp, &file_lock, &flock);
 	if (error)
 		goto out;
+
+	if (cmd == F_OFD_GETLK) {
+		cmd = F_GETLK;
+		file_lock.fl_flags |= FL_OFDLCK;
+		file_lock.fl_owner = (fl_owner_t)filp;
+	}
 
 	error = vfs_test_lock(filp, &file_lock);
 	if (error)
@@ -1868,10 +1874,26 @@ again:
 	error = flock_to_posix_lock(filp, file_lock, &flock);
 	if (error)
 		goto out;
-	if (cmd == F_SETLKW) {
+
+	/*
+	 * If the cmd is requesting file-private locks, then set the
+	 * FL_OFDLCK flag and override the owner.
+	 */
+	switch (cmd) {
+	case F_OFD_SETLK:
+		cmd = F_SETLK;
+		file_lock->fl_flags |= FL_OFDLCK;
+		file_lock->fl_owner = (fl_owner_t)filp;
+		break;
+	case F_OFD_SETLKW:
+		cmd = F_SETLKW;
+		file_lock->fl_flags |= FL_OFDLCK;
+		file_lock->fl_owner = (fl_owner_t)filp;
+		/* Fallthrough */
+	case F_SETLKW:
 		file_lock->fl_flags |= FL_SLEEP;
 	}
-	
+
 	error = -EBADF;
 	switch (flock.l_type) {
 	case F_RDLCK:
@@ -1917,7 +1939,7 @@ out:
 /* Report the first existing lock that would conflict with l.
  * This implements the F_GETLK command of fcntl().
  */
-int fcntl_getlk64(struct file *filp, struct flock64 __user *l)
+int fcntl_getlk64(struct file *filp, unsigned int cmd, struct flock64 __user *l)
 {
 	struct file_lock file_lock;
 	struct flock64 flock;
@@ -1933,6 +1955,12 @@ int fcntl_getlk64(struct file *filp, struct flock64 __user *l)
 	error = flock64_to_posix_lock(filp, &file_lock, &flock);
 	if (error)
 		goto out;
+
+	if (cmd == F_OFD_GETLK) {
+		cmd = F_GETLK64;
+		file_lock.fl_flags |= FL_OFDLCK;
+		file_lock.fl_owner = (fl_owner_t)filp;
+	}
 
 	error = vfs_test_lock(filp, &file_lock);
 	if (error)
@@ -1986,10 +2014,26 @@ again:
 	error = flock64_to_posix_lock(filp, file_lock, &flock);
 	if (error)
 		goto out;
-	if (cmd == F_SETLKW64) {
+
+	/*
+	 * If the cmd is requesting file-private locks, then set the
+	 * FL_OFDLCK flag and override the owner.
+	 */
+	switch (cmd) {
+	case F_OFD_SETLK:
+		cmd = F_SETLK64;
+		file_lock->fl_flags |= FL_OFDLCK;
+		file_lock->fl_owner = (fl_owner_t)filp;
+		break;
+	case F_OFD_SETLKW:
+		cmd = F_SETLKW64;
+		file_lock->fl_flags |= FL_OFDLCK;
+		file_lock->fl_owner = (fl_owner_t)filp;
+		/* Fallthrough */
+	case F_SETLKW64:
 		file_lock->fl_flags |= FL_SLEEP;
 	}
-	
+
 	error = -EBADF;
 	switch (flock.l_type) {
 	case F_RDLCK:
@@ -2065,7 +2109,7 @@ EXPORT_SYMBOL(locks_remove_posix);
 /*
  * This function is called on the last close of an open file.
  */
-void locks_remove_flock(struct file *filp)
+void locks_remove_file(struct file *filp)
 {
 	struct inode * inode = filp->f_path.dentry->d_inode;
 	struct file_lock *fl;
@@ -2073,6 +2117,8 @@ void locks_remove_flock(struct file *filp)
 
 	if (!inode->i_flock)
 		return;
+
+	locks_remove_posix(filp, (fl_owner_t)filp);
 
 	if (filp->f_op && filp->f_op->flock) {
 		struct file_lock fl = {
@@ -2167,8 +2213,14 @@ static void lock_get_status(struct seq_file *f, struct file_lock *fl,
 
 	seq_printf(f, "%lld:%s ", id, pfx);
 	if (IS_POSIX(fl)) {
-		seq_printf(f, "%6s %s ",
-			     (fl->fl_flags & FL_ACCESS) ? "ACCESS" : "POSIX ",
+		if (fl->fl_flags & FL_ACCESS)
+			seq_printf(f, "ACCESS");
+		else if (IS_OFDLCK(fl))
+			seq_printf(f, "FLPVT ");
+		else
+			seq_printf(f, "POSIX ");
+
+		seq_printf(f, " %s ",
 			     (inode == NULL) ? "*NOINODE*" :
 			     mandatory_lock(inode) ? "MANDATORY" : "ADVISORY ");
 	} else if (IS_FLOCK(fl)) {
@@ -2205,7 +2257,7 @@ static void lock_get_status(struct seq_file *f, struct file_lock *fl,
 				inode->i_sb->s_id, inode->i_ino);
 #else
 		/* userspace relies on this representation of dev_t ;-( */
-		seq_printf(f, "%d %02x:%02x:%ld ", fl_pid,
+		seq_printf(f, "%d %02x:%02x:%lu ", fl_pid,
 				MAJOR(inode->i_sb->s_dev),
 				MINOR(inode->i_sb->s_dev), inode->i_ino);
 #endif

@@ -137,7 +137,7 @@ static struct console *exclusive_console;
  */
 struct console_cmdline
 {
-	char	name[8];			/* Name of the driver	    */
+	char	name[16];			/* Name of the driver	    */
 	int	index;				/* Minor dev. to use	    */
 	char	*options;			/* Options for the driver   */
 #ifdef CONFIG_A11Y_BRAILLE_CONSOLE
@@ -552,53 +552,6 @@ static inline void boot_delay_msec(void)
 }
 #endif
 
-/*
- * Return the number of unread characters in the log buffer.
- */
-static int log_buf_get_len(void)
-{
-	return logged_chars;
-}
-
-/*
- * Clears the ring-buffer
- */
-void log_buf_clear(void)
-{
-	logged_chars = 0;
-}
-
-/*
- * Copy a range of characters from the log buffer.
- */
-int log_buf_copy(char *dest, int idx, int len)
-{
-	int ret, max;
-	bool took_lock = false;
-
-	if (!oops_in_progress) {
-		raw_spin_lock_irq(&logbuf_lock);
-		took_lock = true;
-	}
-
-	max = log_buf_get_len();
-	if (idx < 0 || idx >= max) {
-		ret = -1;
-	} else {
-		if (len > max - idx)
-			len = max - idx;
-		ret = len;
-		idx += (log_end - max);
-		while (len-- > 0)
-			dest[len] = LOG_BUF(idx + len);
-	}
-
-	if (took_lock)
-		raw_spin_unlock_irq(&logbuf_lock);
-
-	return ret;
-}
-
 #ifdef CONFIG_SECURITY_DMESG_RESTRICT
 int dmesg_restrict = 1;
 #else
@@ -944,8 +897,19 @@ static void call_console_drivers(unsigned start, unsigned end)
 	start_print = start;
 	while (cur_index != end) {
 		if (msg_level < 0 && ((end - cur_index) > 2)) {
+			/*
+			 * prepare buf_prefix, as a contiguous array,
+			 * to be processed by log_prefix function
+			 */
+			char buf_prefix[SYSLOG_PRI_MAX_LENGTH+1];
+			unsigned i;
+			for (i = 0; i < ((end - cur_index)) && (i < SYSLOG_PRI_MAX_LENGTH); i++) {
+				buf_prefix[i] = LOG_BUF(cur_index + i);
+			}
+			buf_prefix[i] = '\0'; /* force '\0' as last string character */
+
 			/* strip log prefix */
-			cur_index += log_prefix(&LOG_BUF(cur_index), &msg_level, NULL);
+			cur_index += log_prefix((const char *)&buf_prefix, &msg_level, NULL);
 			start_print = cur_index;
 		}
 		while (cur_index != end) {
@@ -1125,9 +1089,9 @@ static int console_trylock_for_printk(unsigned int cpu)
 		}
 	}
 	printk_cpu = UINT_MAX;
+	raw_spin_unlock(&logbuf_lock);
 	if (wake)
 		up(&console_sem);
-	raw_spin_unlock(&logbuf_lock);
 	return retval;
 }
 static const char recursion_bug_msg [] =
@@ -1846,6 +1810,7 @@ void register_console(struct console *newcon)
 	 */
 	for (i = 0; i < MAX_CMDLINECONSOLES && console_cmdline[i].name[0];
 			i++) {
+		BUILD_BUG_ON(sizeof(console_cmdline[i].name) != sizeof(newcon->name));
 		if (strcmp(console_cmdline[i].name, newcon->name) != 0)
 			continue;
 		if (newcon->index >= 0 &&
@@ -2001,7 +1966,7 @@ late_initcall(printk_late_init);
 
 #if defined CONFIG_PRINTK
 
-int printk_sched(const char *fmt, ...)
+int printk_deferred(const char *fmt, ...)
 {
 	unsigned long flags;
 	va_list args;

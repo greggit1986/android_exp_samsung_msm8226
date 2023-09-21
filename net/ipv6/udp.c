@@ -345,17 +345,15 @@ int udpv6_recvmsg(struct kiocb *iocb, struct sock *sk,
 	int peeked, off = 0;
 	int err;
 	int is_udplite = IS_UDPLITE(sk);
+	bool checksum_valid = false;
 	int is_udp4;
 	bool slow;
 
-	if (addr_len)
-		*addr_len=sizeof(struct sockaddr_in6);
-
 	if (flags & MSG_ERRQUEUE)
-		return ipv6_recv_error(sk, msg, len);
+		return ipv6_recv_error(sk, msg, len, addr_len);
 
 	if (np->rxpmtu && np->rxopt.bits.rxpmtu)
-		return ipv6_recv_rxpmtu(sk, msg, len);
+		return ipv6_recv_rxpmtu(sk, msg, len, addr_len);
 
 try_again:
 	skb = __skb_recv_datagram(sk, flags | (noblock ? MSG_DONTWAIT : 0),
@@ -379,15 +377,17 @@ try_again:
 	 */
 
 	if (copied < ulen || UDP_SKB_CB(skb)->partial_cov) {
-		if (udp_lib_checksum_complete(skb))
+		checksum_valid = !udp_lib_checksum_complete(skb);
+		if (!checksum_valid)
 			goto csum_copy_err;
 	}
 
-	if (skb_csum_unnecessary(skb))
+	if (checksum_valid || skb_csum_unnecessary(skb))
 		err = skb_copy_datagram_iovec(skb, sizeof(struct udphdr),
 					      msg->msg_iov, copied       );
 	else {
-		err = skb_copy_and_csum_datagram_iovec(skb, sizeof(struct udphdr), msg->msg_iov);
+		err = skb_copy_and_csum_datagram_iovec(skb, sizeof(struct udphdr),
+						       msg->msg_iov, copied);
 		if (err == -EINVAL)
 			goto csum_copy_err;
 	}
@@ -423,7 +423,7 @@ try_again:
 			if (ipv6_addr_type(&sin6->sin6_addr) & IPV6_ADDR_LINKLOCAL)
 				sin6->sin6_scope_id = IP6CB(skb)->iif;
 		}
-
+		*addr_len = sizeof(*sin6);
 	}
 	if (is_udp4) {
 		if (inet->cmsg_flags)
@@ -454,10 +454,9 @@ csum_copy_err:
 	}
 	unlock_sock_fast(sk, slow);
 
-	if (noblock)
-		return -EAGAIN;
-
-	/* starting over for a new packet */
+	
+	/* starting over for a new packet, but check if we need to yield */
+	cond_resched();
 	msg->msg_flags &= ~MSG_TRUNC;
 	goto try_again;
 }
@@ -478,6 +477,9 @@ void __udp6_lib_err(struct sk_buff *skb, struct inet6_skb_parm *opt,
 			       saddr, uh->source, inet6_iif(skb), udptable);
 	if (sk == NULL)
 		return;
+
+	if (type == ICMPV6_PKT_TOOBIG)
+		ip6_sk_update_pmtu(skb, sk, info);
 
 	np = inet6_sk(sk);
 
@@ -960,6 +962,7 @@ int udpv6_sendmsg(struct kiocb *iocb, struct sock *sk,
 	struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *) msg->msg_name;
 	struct in6_addr *daddr, *final_p, final;
 	struct ipv6_txoptions *opt = NULL;
+	struct ipv6_txoptions *opt_to_free = NULL;
 	struct ip6_flowlabel *flowlabel = NULL;
 	struct flowi6 fl6;
 	struct dst_entry *dst;
@@ -1092,7 +1095,7 @@ do_udp_sendmsg:
 		fl6.flowi6_oif = np->sticky_pktinfo.ipi6_ifindex;
 
 	fl6.flowi6_mark = sk->sk_mark;
-	fl6.flowi6_uid = sock_i_uid(sk);
+	fl6.flowi6_uid = sk->sk_uid;
 
 	if (msg->msg_controllen) {
 		opt = &opt_space;
@@ -1114,8 +1117,10 @@ do_udp_sendmsg:
 			opt = NULL;
 		connected = 0;
 	}
-	if (opt == NULL)
-		opt = np->opt;
+	if (!opt) {
+		opt = txopt_get(np);
+		opt_to_free = opt;
+	}
 	if (flowlabel)
 		opt = fl6_merge_options(&opt_space, flowlabel, opt);
 	opt = ipv6_fixup_options(&opt_space, opt);
@@ -1216,6 +1221,7 @@ do_append_data:
 out:
 	dst_release(dst);
 	fl6_sock_release(flowlabel);
+	txopt_put(opt_to_free);
 	if (!err)
 		return len;
 	/*
@@ -1357,6 +1363,8 @@ static struct sk_buff *udp6_ufo_fragment(struct sk_buff *skb,
 	 * bytes to insert fragment header.
 	 */
 	unfrag_ip6hlen = ip6_find_1stfragopt(skb, &prevhdr);
+	if (unfrag_ip6hlen < 0)
+		return ERR_PTR(unfrag_ip6hlen);
 	nexthdr = *prevhdr;
 	*prevhdr = NEXTHDR_FRAGMENT;
 	unfrag_len = skb_network_header(skb) - skb_mac_header(skb) +
@@ -1370,7 +1378,7 @@ static struct sk_buff *udp6_ufo_fragment(struct sk_buff *skb,
 	fptr = (struct frag_hdr *)(skb_network_header(skb) + unfrag_ip6hlen);
 	fptr->nexthdr = nexthdr;
 	fptr->reserved = 0;
-	ipv6_select_ident(fptr, (struct rt6_info *)skb_dst(skb));
+	fptr->identification = skb_shinfo(skb)->ip6_frag_id;
 
 	/* Fragment the skb. ipv6 header and the remaining fields of the
 	 * fragment header are updated in ipv6_gso_segment()
@@ -1463,6 +1471,17 @@ void udp6_proc_exit(struct net *net) {
 }
 #endif /* CONFIG_PROC_FS */
 
+void udp_v6_clear_sk(struct sock *sk, int size)
+{
+	struct inet_sock *inet = inet_sk(sk);
+
+	/* we do not want to clear pinet6 field, because of RCU lookups */
+	sk_prot_clear_portaddr_nulls(sk, offsetof(struct inet_sock, pinet6));
+
+	size -= offsetof(struct inet_sock, pinet6) + sizeof(inet->pinet6);
+	memset(&inet->pinet6 + 1, 0, size);
+}
+
 /* ------------------------------------------------------------------------ */
 
 struct proto udpv6_prot = {
@@ -1493,7 +1512,7 @@ struct proto udpv6_prot = {
 	.compat_setsockopt = compat_udpv6_setsockopt,
 	.compat_getsockopt = compat_udpv6_getsockopt,
 #endif
-	.clear_sk	   = sk_prot_clear_portaddr_nulls,
+	.clear_sk	   = udp_v6_clear_sk,
 };
 
 static struct inet_protosw udpv6_protosw = {

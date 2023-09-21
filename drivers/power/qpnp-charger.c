@@ -34,7 +34,7 @@
 #include <linux/regulator/machine.h>
 #include <linux/of_batterydata.h>
 #include <linux/qpnp-revid.h>
-#include <linux/android_alarm.h>
+#include <linux/hrtimer.h>
 #include <linux/spinlock.h>
 #include <linux/gpio.h>
 #include <linux/of_gpio.h>
@@ -420,7 +420,7 @@ struct qpnp_chg_chip {
 	struct mutex			jeita_configure_lock;
 	spinlock_t			usbin_health_monitor_lock;
 	struct mutex			batfet_vreg_lock;
-	struct alarm			reduce_power_stage_alarm;
+	struct hrtimer			hrtimer_reduce_power_stage_alarm;
 	struct work_struct		reduce_power_stage_work;
 	bool				power_stage_workaround_running;
 	bool				power_stage_workaround_enable;
@@ -1607,8 +1607,7 @@ qpnp_chg_vddmax_and_trim_set(struct qpnp_chg_chip *chip,
 			voltage, trim_mv, vddmax, trim);
 	return 0;
 }
-
-#ifndef CONFIG_BATTERY_SAMSUNG
+#if !defined(CONFIG_BATTERY_SAMSUNG) || (defined(CONFIG_BATTERY_SAMSUNG) && defined(CONFIG_BATTERY_SWELLING))
 static int
 qpnp_chg_vddmax_get(struct qpnp_chg_chip *chip)
 {
@@ -1640,6 +1639,7 @@ qpnp_chg_set_appropriate_vddmax(struct qpnp_chg_chip *chip)
 				chip->delta_vddmax_mv);
 }
 
+#if !defined(CONFIG_SEC_ATLANTIC_PROJECT)
 #define MIN_DELTA_MV_TO_INCREASE_VDD_MAX	8
 #define MAX_DELTA_VDD_MAX_MV			80
 #define VDD_MAX_CENTER_OFFSET			4
@@ -1665,6 +1665,7 @@ qpnp_chg_adjust_vddmax(struct qpnp_chg_chip *chip, int vbat_mv)
 	pr_debug("using delta_vddmax_mv = %d\n", chip->delta_vddmax_mv);
 	qpnp_chg_set_appropriate_vddmax(chip);
 }
+#endif
 
 static void
 qpnp_usbin_health_check_work(struct work_struct *work)
@@ -1752,8 +1753,11 @@ sec_qpnp_usbin_valid_work(struct work_struct *work)
 				#endif
 				}
 			}
-			if (!qpnp_chg_is_dc_chg_plugged_in(chip))
+			if (!qpnp_chg_is_dc_chg_plugged_in(chip)) {
+				chip->delta_vddmax_mv = 0;
+				qpnp_chg_set_appropriate_vddmax(chip);
 				chip->chg_done = false;
+			}
 			qpnp_chg_usb_suspend_enable(chip, 0);
 			qpnp_chg_iusbmax_set(chip, QPNP_CHG_I_MAX_MIN_100);
 			chip->prev_usb_max_ma = -EINVAL;
@@ -1789,6 +1793,10 @@ sec_qpnp_usbin_valid_work(struct work_struct *work)
 				}
 			}
 
+			if (!qpnp_chg_is_dc_chg_plugged_in(chip)) {
+				chip->delta_vddmax_mv = 0;
+				qpnp_chg_set_appropriate_vddmax(chip);
+			}
 			wait_muic_event = 0;
 			pr_info("%s connected vbus \n",__func__);
 		#ifndef CONFIG_BATTERY_SAMSUNG
@@ -2012,9 +2020,6 @@ qpnp_chg_usb_usbin_valid_irq_handler(int irq, void *_chip)
 				}
 			}
 
-			if (!qpnp_chg_is_dc_chg_plugged_in(chip))
-				qpnp_chg_set_appropriate_vddmax(chip);
-			
 			#ifndef CONFIG_BATTERY_SAMSUNG
 			schedule_delayed_work(&chip->eoc_work,
 				msecs_to_jiffies(EOC_CHECK_PERIOD_MS));
@@ -2210,8 +2215,6 @@ qpnp_chg_dc_dcin_valid_irq_handler(int irq, void *_chip)
 					qpnp_chg_is_otg_en_set(chip))) {
 			chip->chg_done = false;
 		} else {
-			if (!qpnp_chg_is_usb_chg_plugged_in(chip))
-				qpnp_chg_set_appropriate_vddmax(chip);
 			#ifndef CONFIG_BATTERY_SAMSUNG
 			schedule_delayed_work(&chip->eoc_work,
 				msecs_to_jiffies(EOC_CHECK_PERIOD_MS));
@@ -3380,17 +3383,6 @@ qpnp_chg_trim_ibat(struct qpnp_chg_chip *chip, u8 ibat_trim)
 						IBAT_TRIM_HIGH_LIM))
 				return;
 		}
-
-		if (chip->type == SMBBP) {
-			rc = qpnp_chg_masked_write(chip,
-					chip->buck_base + SEC_ACCESS,
-					0xFF, 0xA5, 1);
-			if (rc) {
-				pr_err("failed to write SEC_ACCESS: %d\n", rc);
-				return;
-			}
-		}
-
 		ibat_trim |= IBAT_TRIM_GOOD_BIT;
 		rc = qpnp_chg_write(chip, &ibat_trim,
 				chip->buck_base + BUCK_CTRL_TRIM3, 1);
@@ -3426,7 +3418,7 @@ qpnp_chg_input_current_settled(struct qpnp_chg_chip *chip)
 	if (!chip->ibat_calibration_enabled)
 		return 0;
 
-	if (chip->type != SMBB && chip->type != SMBBP)
+	if (chip->type != SMBB)
 		return 0;
 
 	rc = qpnp_chg_read(chip, &reg,
@@ -3446,17 +3438,6 @@ qpnp_chg_input_current_settled(struct qpnp_chg_chip *chip)
 		pr_debug("Improper ibat_trim value=%x setting to value=%x\n",
 						ibat_trim, IBAT_TRIM_MEAN);
 		ibat_trim = IBAT_TRIM_MEAN;
-
-		if (chip->type == SMBBP) {
-			rc = qpnp_chg_masked_write(chip,
-					chip->buck_base + SEC_ACCESS,
-					0xFF, 0xA5, 1);
-			if (rc) {
-				pr_err("failed to write SEC_ACCESS: %d\n", rc);
-				return rc;
-			}
-		}
-
 		rc = qpnp_chg_masked_write(chip,
 				chip->buck_base + BUCK_CTRL_TRIM3,
 				IBAT_TRIM_OFFSET_MASK, ibat_trim, 1);
@@ -3699,14 +3680,15 @@ qpnp_chg_regulator_boost_enable(struct regulator_dev *rdev)
 			pr_err("failed to write SEC_ACCESS rc=%d\n", rc);
 			return rc;
 		}
-
-		rc = qpnp_chg_masked_write(chip,
-			chip->usb_chgpth_base + COMP_OVR1,
-			0xFF,
-			0x2F, 1);
-		if (rc) {
-			pr_err("failed to write COMP_OVR1 rc=%d\n", rc);
-			return rc;
+		if (chip->type != SMBBP) {
+			rc = qpnp_chg_masked_write(chip,
+				chip->usb_chgpth_base + COMP_OVR1,
+				0xFF,
+				0x2F, 1);
+			if (rc) {
+				pr_err("failed to write COMP_OVR1 rc=%d\n", rc);
+				return rc;
+			}
 		}
 	}
 
@@ -3806,16 +3788,16 @@ qpnp_chg_regulator_boost_disable(struct regulator_dev *rdev)
 			pr_err("failed to write SEC_ACCESS rc=%d\n", rc);
 			return rc;
 		}
-
-		rc = qpnp_chg_masked_write(chip,
-			chip->usb_chgpth_base + COMP_OVR1,
-			0xFF,
-			0x00, 1);
-		if (rc) {
-			pr_err("failed to write COMP_OVR1 rc=%d\n", rc);
-			return rc;
+		if (chip->type != SMBBP) {
+			rc = qpnp_chg_masked_write(chip,
+				chip->usb_chgpth_base + COMP_OVR1,
+				0xFF,
+				0x00, 1);
+			if (rc) {
+				pr_err("failed to write COMP_OVR1 rc=%d\n", rc);
+				return rc;
+			}
 		}
-
 		usleep(1000);
 
 		qpnp_chg_usb_suspend_enable(chip, 0);
@@ -4171,6 +4153,7 @@ qpnp_chg_soc_check_work(struct work_struct *work)
 }
 #endif
 
+
 #define HYSTERISIS_DECIDEGC 20
 static void
 qpnp_chg_adc_notification(enum qpnp_tm_state state, void *ctx)
@@ -4501,9 +4484,9 @@ qpnp_chg_reduce_power_stage(struct qpnp_chg_chip *chip)
 	if (usb_present && usb_ma_above_wall) {
 		getnstimeofday(&ts);
 		ts.tv_sec += POWER_STAGE_REDUCE_CHECK_PERIOD_SECONDS;
-		alarm_start_range(&chip->reduce_power_stage_alarm,
+		hrtimer_start_range_ns(&chip->hrtimer_reduce_power_stage_alarm,
 					timespec_to_ktime(ts),
-					timespec_to_ktime(ts));
+					ULONG_MAX, HRTIMER_MODE_ABS);
 	} else {
 		pr_debug("stopping power stage workaround\n");
 		chip->power_stage_workaround_running = false;
@@ -4540,13 +4523,15 @@ qpnp_chg_reduce_power_stage_work(struct work_struct *work)
 	qpnp_chg_reduce_power_stage(chip);
 }
 
-static void
-qpnp_chg_reduce_power_stage_callback(struct alarm *alarm)
+enum hrtimer_restart
+qpnp_chg_reduce_power_stage_callback(struct hrtimer *hrtimer)
 {
-	struct qpnp_chg_chip *chip = container_of(alarm, struct qpnp_chg_chip,
-						reduce_power_stage_alarm);
+	struct qpnp_chg_chip *chip = container_of(hrtimer, struct qpnp_chg_chip,
+						hrtimer_reduce_power_stage_alarm);
 
 	schedule_work(&chip->reduce_power_stage_work);
+    
+    return HRTIMER_NORESTART;
 }
 
 static int
@@ -4684,6 +4669,7 @@ qpnp_chg_setup_flags(struct qpnp_chg_chip *chip)
 	return 0;
 }
 
+#if !defined(CONFIG_SEC_ATLANTIC_PROJECT)
 static void
 sec_qpnp_chg_check_vddmax(struct qpnp_chg_chip *chip)
 {
@@ -4702,6 +4688,7 @@ sec_qpnp_chg_check_vddmax(struct qpnp_chg_chip *chip)
 				pr_err("failed to read buck rc=%d\n", rc);
 	}
 }
+#endif
 
 static int
 qpnp_chg_request_irqs(struct qpnp_chg_chip *chip)
@@ -5567,6 +5554,9 @@ static enum power_supply_property sec_qpnp_chg_props[] = {
 	POWER_SUPPLY_PROP_INPUT_CURRENT_TRIM,
 	POWER_SUPPLY_PROP_INPUT_CURRENT_SETTLED,
 	POWER_SUPPLY_PROP_VOLTAGE_MIN,
+#if defined(CONFIG_BATTERY_SWELLING)
+	POWER_SUPPLY_PROP_VOLTAGE_MAX,
+#endif
 	POWER_SUPPLY_PROP_INPUT_VOLTAGE_REGULATION,
 };
 
@@ -5581,6 +5571,9 @@ sec_qpnp_chg_property_is_writeable(struct power_supply *psy,
 	case POWER_SUPPLY_PROP_INPUT_CURRENT_TRIM:
 	case POWER_SUPPLY_PROP_INPUT_CURRENT_SETTLED:
 	case POWER_SUPPLY_PROP_VOLTAGE_MIN:
+#if defined(CONFIG_BATTERY_SWELLING)
+	case POWER_SUPPLY_PROP_VOLTAGE_MAX:
+#endif
 	case POWER_SUPPLY_PROP_COOL_TEMP:
 	case POWER_SUPPLY_PROP_WARM_TEMP:
 	case POWER_SUPPLY_PROP_CAPACITY:
@@ -5619,7 +5612,9 @@ sec_qpnp_chg_get_property(struct power_supply *psy,
 				val->intval = POWER_SUPPLY_HEALTH_GOOD;
 			break;
 		case POWER_SUPPLY_PROP_CURRENT_MAX:
+#if !defined(CONFIG_SEC_ATLANTIC_PROJECT)
 			sec_qpnp_chg_check_vddmax(chip);
+#endif
 			val->intval = charger->charging_current_max;
 			break;
 		case POWER_SUPPLY_PROP_CURRENT_AVG:
@@ -5654,6 +5649,11 @@ sec_qpnp_chg_get_property(struct power_supply *psy,
 		case POWER_SUPPLY_PROP_VOLTAGE_MIN:
 			val->intval = qpnp_chg_vinmin_get(chip) * 1000;
 			break;
+#if defined(CONFIG_BATTERY_SWELLING)
+		case POWER_SUPPLY_PROP_VOLTAGE_MAX:
+			val->intval = qpnp_chg_vddmax_get(chip);
+			break;
+#endif
 		default:
 			return -EINVAL;
 	}
@@ -5771,6 +5771,13 @@ sec_qpnp_chg_set_property(struct power_supply *psy,
 	case POWER_SUPPLY_PROP_VOLTAGE_MIN:
 		qpnp_chg_vinmin_set(chip, val->intval / 1000);
 		break;
+#if defined(CONFIG_BATTERY_SWELLING)
+	case POWER_SUPPLY_PROP_VOLTAGE_MAX:
+		pr_info("set cv(%dmV)",val->intval);
+		qpnp_chg_vddmax_and_trim_set(chip, val->intval, 
+						chip->delta_vddmax_mv);
+		break;
+#endif
 	default:
 		return -EINVAL;
 	}
@@ -5921,8 +5928,9 @@ qpnp_charger_probe(struct spmi_device *spmi)
 
 	mutex_init(&chip->jeita_configure_lock);
 	spin_lock_init(&chip->usbin_health_monitor_lock);
-	alarm_init(&chip->reduce_power_stage_alarm, ANDROID_ALARM_RTC_WAKEUP,
-			qpnp_chg_reduce_power_stage_callback);
+	hrtimer_init(&chip->hrtimer_reduce_power_stage_alarm, CLOCK_BOOTTIME,
+			HRTIMER_MODE_ABS);
+	chip->hrtimer_reduce_power_stage_alarm.function = &qpnp_chg_reduce_power_stage_callback;
 	INIT_WORK(&chip->reduce_power_stage_work,
 			qpnp_chg_reduce_power_stage_work);
 	mutex_init(&chip->batfet_vreg_lock);
@@ -5981,8 +5989,7 @@ qpnp_charger_probe(struct spmi_device *spmi)
 				goto fail_chg_enable;
 			}
 
-			if (subtype == SMBB_BAT_IF_SUBTYPE ||
-					subtype == SMBBP_BAT_IF_SUBTYPE) {
+			if (subtype == SMBB_BAT_IF_SUBTYPE) {
 				chip->iadc_dev = qpnp_get_iadc(chip->dev,
 						"chg");
 				if (IS_ERR(chip->iadc_dev)) {
@@ -6362,7 +6369,7 @@ qpnp_charger_remove(struct spmi_device *spmi)
 	#endif
 	cancel_work_sync(&chip->insertion_ocv_work);
 	cancel_work_sync(&chip->reduce_power_stage_work);
-	alarm_cancel(&chip->reduce_power_stage_alarm);
+	hrtimer_cancel(&chip->hrtimer_reduce_power_stage_alarm);
 
 	mutex_destroy(&chip->batfet_vreg_lock);
 	mutex_destroy(&chip->jeita_configure_lock);

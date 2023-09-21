@@ -1,6 +1,6 @@
 /* Qualcomm Crypto driver
  *
- * Copyright (c) 2010-2014, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2010-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -68,6 +68,7 @@ enum qcrypto_bus_state {
 	BUS_BANDWIDTH_RELEASING,
 	BUS_BANDWIDTH_ALLOCATING,
 	BUS_SUSPENDED,
+	BUS_SUSPENDING,
 };
 
 struct crypto_stat {
@@ -565,7 +566,7 @@ static void qcrypto_bw_reaper_work(struct work_struct *work)
 		/* check if engine is stuck */
 		if (pengine->req) {
 			if (pengine->check_flag)
-				dev_err(&pengine->pdev->dev,
+				dev_warn(&pengine->pdev->dev,
 				"The engine appears to be stuck seq %d req %p.\n",
 				active_seq, pengine->req);
 			pengine->check_flag = false;
@@ -1770,12 +1771,12 @@ static int _qcrypto_process_aead(struct  crypto_engine *pengine,
 			 * include  assoicated data, ciphering data stream,
 			 * generated MAC, and CCM padding.
 			 */
-			if ((MAX_ALIGN_SIZE * 2 > ULONG_MAX - req->assoclen) ||
+			if ((MAX_ALIGN_SIZE * 2 > UINT_MAX - req->assoclen) ||
 				((MAX_ALIGN_SIZE * 2 + req->assoclen) >
-						ULONG_MAX - qreq.ivsize) ||
+						UINT_MAX - qreq.ivsize) ||
 				((MAX_ALIGN_SIZE * 2 + req->assoclen
 					+ qreq.ivsize)
-						> ULONG_MAX - req->cryptlen)) {
+						> UINT_MAX - req->cryptlen)) {
 				pr_err("Integer overflow on aead req length.\n");
 				return -EINVAL;
 			}
@@ -1834,8 +1835,7 @@ static int _qcrypto_process_aead(struct  crypto_engine *pengine,
 
 	return ret;
 }
-#define list_next_entry(pos, member) \
-		list_entry(pos->member.next, typeof(*pos), member)
+
 static struct crypto_engine *_qcrypto_static_assign_engine(
 					struct crypto_priv *cp)
 {
@@ -1886,6 +1886,12 @@ again:
 	}
 
 	backlog_eng = crypto_get_backlog(&pengine->req_queue);
+
+	/* make sure it is in high bandwidth state */
+	if (pengine->bw_state != BUS_HAS_BANDWIDTH) {
+		spin_unlock_irqrestore(&cp->lock, flags);
+		return 0;
+	}
 
 	/* try to get request from request queue of the engine first */
 	async_req = crypto_dequeue_request(&pengine->req_queue);
@@ -2038,6 +2044,7 @@ static int _qcrypto_queue_req(struct crypto_priv *cp,
 			pengine = NULL;
 			break;
 		case BUS_SUSPENDED:
+		case BUS_SUSPENDING:
 		default:
 			pengine = NULL;
 			break;
@@ -3380,6 +3387,7 @@ static int _sha1_hmac_setkey(struct crypto_ahash *tfm, const u8 *key,
 							unsigned int len)
 {
 	struct qcrypto_sha_ctx *sha_ctx = crypto_tfm_ctx(&tfm->base);
+	int ret = 0;
 	memset(&sha_ctx->authkey[0], 0, SHA1_BLOCK_SIZE);
 	if (len <= SHA1_BLOCK_SIZE) {
 		memcpy(&sha_ctx->authkey[0], key, len);
@@ -3387,16 +3395,19 @@ static int _sha1_hmac_setkey(struct crypto_ahash *tfm, const u8 *key,
 	} else {
 		sha_ctx->alg = QCE_HASH_SHA1;
 		sha_ctx->diglen = SHA1_DIGEST_SIZE;
-		_sha_hmac_setkey(tfm, key, len);
+		ret = _sha_hmac_setkey(tfm, key, len);
+		if (ret)
+			pr_err("SHA1 hmac setkey failed\n");
 		sha_ctx->authkey_in_len = SHA1_BLOCK_SIZE;
 	}
-	return 0;
+	return ret;
 }
 
 static int _sha256_hmac_setkey(struct crypto_ahash *tfm, const u8 *key,
 							unsigned int len)
 {
 	struct qcrypto_sha_ctx *sha_ctx = crypto_tfm_ctx(&tfm->base);
+	int ret = 0;
 
 	memset(&sha_ctx->authkey[0], 0, SHA256_BLOCK_SIZE);
 	if (len <= SHA256_BLOCK_SIZE) {
@@ -3405,11 +3416,13 @@ static int _sha256_hmac_setkey(struct crypto_ahash *tfm, const u8 *key,
 	} else {
 		sha_ctx->alg = QCE_HASH_SHA256;
 		sha_ctx->diglen = SHA256_DIGEST_SIZE;
-		_sha_hmac_setkey(tfm, key, len);
+		ret = _sha_hmac_setkey(tfm, key, len);
+		if (ret)
+			pr_err("SHA256 hmac setkey failed\n");
 		sha_ctx->authkey_in_len = SHA256_BLOCK_SIZE;
 	}
 
-	return 0;
+	return ret;
 }
 
 static int _sha_hmac_init_ihash(struct ahash_request *req,
@@ -4659,6 +4672,25 @@ err:
 	return rc;
 };
 
+static int _qcrypto_engine_in_use(struct crypto_engine *pengine)
+{
+	struct crypto_priv *cp = pengine->pcp;
+
+	if (pengine->req || pengine->req_queue.qlen || cp->req_queue.qlen)
+		return 1;
+	return 0;
+}
+
+static void _qcrypto_do_suspending(struct crypto_engine *pengine)
+{
+	struct crypto_priv *cp = pengine->pcp;
+
+	if (cp->platform_support.bus_scale_table == NULL)
+		return;
+	del_timer_sync(&pengine->bw_reaper_timer);
+	qcrypto_ce_set_bus(pengine, false);
+}
+
 static int  _qcrypto_suspend(struct platform_device *pdev, pm_message_t state)
 {
 	int ret = 0;
@@ -4686,9 +4718,20 @@ static int  _qcrypto_suspend(struct platform_device *pdev, pm_message_t state)
 			ret = -EBUSY;
 		break;
 	case BUS_HAS_BANDWIDTH:
+		if (_qcrypto_engine_in_use(pengine)) {
+			ret = -EBUSY;
+		} else {
+			pengine->bw_state = BUS_SUSPENDING;
+			spin_unlock_irqrestore(&cp->lock, flags);
+			_qcrypto_do_suspending(pengine);
+			spin_lock_irqsave(&cp->lock, flags);
+			pengine->bw_state = BUS_SUSPENDED;
+		}
+		break;
 	case BUS_BANDWIDTH_RELEASING:
 	case BUS_BANDWIDTH_ALLOCATING:
 	case BUS_SUSPENDED:
+	case BUS_SUSPENDING:
 	default:
 			ret = -EBUSY;
 			break;
@@ -4709,6 +4752,7 @@ static int  _qcrypto_resume(struct platform_device *pdev)
 	struct crypto_engine *pengine;
 	struct crypto_priv *cp;
 	unsigned long flags;
+	int ret = 0;
 
 	pengine = platform_get_drvdata(pdev);
 
@@ -4733,9 +4777,11 @@ static int  _qcrypto_resume(struct platform_device *pdev)
 				pengine->high_bw_req = true;
 			}
 		}
-	}
+	} else
+		ret = -EBUSY;
+
 	spin_unlock_irqrestore(&cp->lock, flags);
-	return 0;
+	return ret;
 }
 
 static struct of_device_id qcrypto_match[] = {
@@ -4773,7 +4819,8 @@ static ssize_t _debug_stats_read(struct file *file, char __user *buf,
 
 	len = _disp_stats(qcrypto);
 
-	rc = simple_read_from_buffer((void __user *) buf, len,
+	if (len <= count)
+      rc = simple_read_from_buffer((void __user *) buf, len,
 			ppos, (void *) _debug_read_buf, len);
 
 	return rc;

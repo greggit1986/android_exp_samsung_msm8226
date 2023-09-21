@@ -156,7 +156,6 @@ static struct adreno_device device_3d0 = {
 
 unsigned int ft_detect_regs[FT_DETECT_REGS_COUNT];
 
-
 /*
  * This is the master list of all GPU cores that are supported by this
  * driver.
@@ -630,7 +629,7 @@ int adreno_perfcounter_query_group(struct adreno_device *adreno_dev,
 		return 0;
 	}
 
-	t = min_t(int, group->reg_count, count);
+	t = min_t(unsigned int, group->reg_count, count);
 
 	buf = kmalloc(t * sizeof(unsigned int), GFP_KERNEL);
 	if (buf == NULL) {
@@ -1736,7 +1735,7 @@ static int adreno_of_get_pdata(struct platform_device *pdev)
 
 	if (adreno_of_read_property(pdev->dev.of_node, "qcom,idle-timeout",
 		&pdata->idle_timeout))
-		pdata->idle_timeout = HZ/12;
+		pdata->idle_timeout = 80;
 
 	pdata->strtstp_sleepwake = of_property_read_bool(pdev->dev.of_node,
 						"qcom,strtstp-sleepwake");
@@ -1933,7 +1932,6 @@ static int adreno_init(struct kgsl_device *device)
 	int i;
 	int ret;
 
-
 	kgsl_pwrctrl_set_state(device, KGSL_STATE_INIT);
 	/*
 	 * initialization only needs to be done once initially until
@@ -2118,7 +2116,6 @@ error_clk_off:
 
 	return status;
 }
-
 
 /**
  * adreno_start() - Power up and initialize the GPU
@@ -3329,8 +3326,6 @@ static unsigned int adreno_readtimestamp(struct kgsl_device *device,
 			KGSL_MEMSTORE_OFFSET(id, eoptimestamp));
 		break;
 	}
-
-	rmb();
 
 	return timestamp;
 }

@@ -42,7 +42,6 @@
 #include "wcd9xxx-common.h"
 #include "wcdcal-hwdep.h"
 
-
 #if defined(CONFIG_SND_SOC_ES705)
 #include "audience/es705-export.h"
 #elif defined(CONFIG_SND_SOC_ES325)
@@ -1226,6 +1225,13 @@ static int taiko_mad_input_put(struct snd_kcontrol *kcontrol,
 	int ret = 0;
 
 	taiko_mad_input = ucontrol->value.integer.value[0];
+
+	if (taiko_mad_input >= ARRAY_SIZE(taiko_conn_mad_text)) {
+		dev_err(codec->dev,
+			"%s: taiko_mad_input = %d out of bounds\n",
+			__func__, taiko_mad_input);
+		return -EINVAL;
+	}
 
 	pr_debug("%s: taiko_mad_input = %s\n", __func__,
 			taiko_conn_mad_text[taiko_mad_input]);
@@ -3470,7 +3476,6 @@ static int taiko_codec_enable_anc(struct snd_soc_dapm_widget *w,
 			snd_soc_write(codec, reg, (old_val & ~mask) |
 				(val & mask));
 		}
-		release_firmware(fw);
 		if (!hwdep_cal)
 			release_firmware(fw);
 		break;
@@ -5773,6 +5778,25 @@ static int taiko_codec_enable_anc_ear(struct snd_soc_dapm_widget *w,
 	}
 	return ret;
 }
+#if 0
+static int taiko_codec_set_iir_gain(struct snd_soc_dapm_widget *w,
+	struct snd_kcontrol *kcontrol, int event)
+{
+	struct snd_soc_codec *codec = w->codec;
+	int value = 0;
+
+	switch (event) {
+	case SND_SOC_DAPM_POST_PMU:
+		value = snd_soc_read(codec, TAIKO_A_CDC_IIR1_GAIN_B1_CTL);
+		snd_soc_write(codec, TAIKO_A_CDC_IIR1_GAIN_B1_CTL, value);
+		break;
+	default:
+		pr_info("%s: event = %d not expected\n", __func__, event);
+		break;
+	}
+	return 0;
+}
+#endif
 
 /* Todo: Have seperate dapm widgets for I2S and Slimbus.
  * Might Need to have callbacks registered only for slimbus
@@ -7449,32 +7473,6 @@ static int taiko_codec_probe(struct snd_soc_codec *codec)
 		rco_clk_rate = TAIKO_MCLK_CLK_12P288MHZ;
 	else
 		rco_clk_rate = TAIKO_MCLK_CLK_9P6MHZ;
-
-#if defined(CONFIG_MACH_KLTE_KOR)
-	if (system_rev >= 13) {
-		/* init and start mbhc */
-		ret = wcd9xxx_mbhc_init(&taiko->mbhc, &taiko->resmgr, codec,
-					taiko_enable_mbhc_micbias,
-					&mbhc_cb, &cdc_intr_ids,
-					rco_clk_rate, false);
-		if (ret) {
-			pr_err("%s: mbhc init failed %d\n", __func__, ret);
-			goto err_init;
-		}
-	}
-#elif defined(CONFIG_MACH_KLTE_JPN)
-	if (system_rev >= 11) {
-		/* init and start mbhc */
-		ret = wcd9xxx_mbhc_init(&taiko->mbhc, &taiko->resmgr, codec,
-					taiko_enable_mbhc_micbias,
-					&mbhc_cb, &cdc_intr_ids,
-					rco_clk_rate, false);
-		if (ret) {
-			pr_err("%s: mbhc init failed %d\n", __func__, ret);
-			goto err_init;
-		}
-	}
-#else
 	taiko->fw_data = kzalloc(sizeof(*(taiko->fw_data)), GFP_KERNEL);
 	if (!taiko->fw_data) {
 		dev_err(codec->dev, "Failed to allocate fw_data\n");
@@ -7489,6 +7487,32 @@ static int taiko_codec_probe(struct snd_soc_codec *codec)
 		dev_err(codec->dev, "%s hwdep failed %d\n", __func__, ret);
 		goto err_hwdep;
 	}
+
+#if defined(CONFIG_MACH_KLTE_KOR)
+	if (system_rev >= 13) {
+		/* init and start mbhc */
+		ret = wcd9xxx_mbhc_init(&taiko->mbhc, &taiko->resmgr, codec,
+					taiko_enable_mbhc_micbias,
+					&mbhc_cb, &cdc_intr_ids,
+					rco_clk_rate, false);
+		if (ret) {
+			pr_err("%s: mbhc init failed %d\n", __func__, ret);
+			goto err_hwdep;
+		}
+	}
+#elif defined(CONFIG_MACH_KLTE_JPN)
+	if (system_rev >= 11) {
+		/* init and start mbhc */
+		ret = wcd9xxx_mbhc_init(&taiko->mbhc, &taiko->resmgr, codec,
+					taiko_enable_mbhc_micbias,
+					&mbhc_cb, &cdc_intr_ids,
+					rco_clk_rate, false);
+		if (ret) {
+			pr_err("%s: mbhc init failed %d\n", __func__, ret);
+			goto err_hwdep;
+		}
+	}
+#else
 #if !defined(CONFIG_SAMSUNG_JACK) && !defined(CONFIG_MUIC_DET_JACK)
 	/* init and start mbhc */
 	ret = wcd9xxx_mbhc_init(&taiko->mbhc, &taiko->resmgr, codec,
@@ -7510,7 +7534,7 @@ static int taiko_codec_probe(struct snd_soc_codec *codec)
                     rco_clk_rate, false);
         if (ret) {
             pr_err("%s: mbhc init failed %d\n", __func__, ret);
-            goto err_init;
+            goto err_hwdep;
         }
 	}
 #endif

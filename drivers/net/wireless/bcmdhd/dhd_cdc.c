@@ -21,7 +21,7 @@
  * software in any way with any other Broadcom software provided under a license
  * other than the GPL, without Broadcom's express prior written consent.
  *
- * $Id: dhd_cdc.c 531050 2015-02-02 07:21:19Z $
+ * $Id: dhd_cdc.c 581040 2015-08-21 05:51:27Z $
  *
  * BDC is like CDC, except it includes a header for data packets to convey
  * packet priority over the bus, and flags (e.g. to indicate checksum status
@@ -371,6 +371,9 @@ dhd_prot_iovar_op(dhd_pub_t *dhdp, const char *name,
 void
 dhd_prot_dump(dhd_pub_t *dhdp, struct bcmstrbuf *strbuf)
 {
+	if (!dhdp || !dhdp->prot)
+		return;
+
 	bcm_bprintf(strbuf, "Protocol CDC: reqid %d\n", dhdp->prot->reqid);
 #ifdef PROP_TXSTATUS
 	dhd_wlfc_dump(dhdp, strbuf);
@@ -506,8 +509,9 @@ dhd_prot_attach(dhd_pub_t *dhd)
 	return 0;
 
 fail:
-	if (cdc != NULL)
-		DHD_OS_PREFREE(dhd, cdc, sizeof(dhd_prot_t));
+	if (cdc != NULL) {
+		DHD_OS_PREFREE(dhd, DHD_PREALLOC_PROT, cdc, sizeof(dhd_prot_t));
+	}
 	return BCME_NOMEM;
 }
 
@@ -518,7 +522,7 @@ dhd_prot_detach(dhd_pub_t *dhd)
 #ifdef PROP_TXSTATUS
 	dhd_wlfc_deinit(dhd);
 #endif
-	DHD_OS_PREFREE(dhd, dhd->prot, sizeof(dhd_prot_t));
+	DHD_OS_PREFREE(dhd, DHD_PREALLOC_PROT, dhd->prot, sizeof(dhd_prot_t));
 	dhd->prot = NULL;
 }
 

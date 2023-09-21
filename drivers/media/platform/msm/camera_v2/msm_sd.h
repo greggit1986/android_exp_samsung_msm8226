@@ -18,6 +18,19 @@
 
 /* NOTE: this header file should ONLY be included by subdev drivers */
 
+#ifndef EEPROM_CAM_FW
+  #if defined(CONFIG_MACH_ATLANTIC3GEUR_OPEN) ||\
+      defined(CONFIG_MACH_ATLANTICLTE_ATT) ||\
+	defined(CONFIG_SEC_HESTIA_PROJECT) ||\
+	defined(CONFIG_MACH_MEGA2LTE_KTT) ||\
+	defined(CONFIG_MACH_VASTALTE_CHN_CMCC_DUOS)
+
+         #define EEPROM_CAM_FW
+         #define EEPROM_FW_OFFSET 48
+         #define EEPROM_FW_SIZE 11
+  #endif
+#endif
+
 struct msm_sd_close_ioctl {
 	unsigned int session;
 	unsigned int stream;
@@ -70,7 +83,8 @@ struct msm_sd_req_vb2_q {
 	int (*put_buf)(struct vb2_buffer *vb2_buf, int session_id,
 		unsigned int stream_id);
 	int (*buf_done)(struct vb2_buffer *vb2_buf, int session_id,
-		unsigned int stream_id);
+			unsigned int stream_id, uint32_t sequence, struct timeval *ts,
+			uint32_t reserved);
 };
 
 #define MSM_SD_NOTIFY_GET_SD 0x00000001

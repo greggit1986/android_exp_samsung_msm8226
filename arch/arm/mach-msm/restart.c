@@ -32,11 +32,11 @@
 #include <mach/msm_iomap.h>
 #include <mach/restart.h>
 #include <mach/socinfo.h>
-#ifdef CONFIG_SEC_DEBUG
+
 #include <mach/sec_debug.h>
 #include <linux/notifier.h>
 #include <linux/ftrace.h>
-#endif
+
 #include <mach/irqs.h>
 #include <mach/scm.h>
 #include "msm_watchdog.h"
@@ -66,9 +66,9 @@
 #endif
 
 static int restart_mode;
-#ifndef CONFIG_SEC_DEBUG
+
 void *restart_reason;
-#endif
+
 
 #ifdef CONFIG_USER_RESET_DEBUG
 #define RESET_CAUSE_LPM_REBOOT 0x95
@@ -124,6 +124,7 @@ static bool get_dload_mode(void)
 }
 #endif
 
+#if !defined(CONFIG_SAMSUNG_PRODUCT_SHIP)
 static void enable_emergency_dload_mode(void)
 {
 	if (emergency_dload_mode_addr) {
@@ -142,6 +143,7 @@ static void enable_emergency_dload_mode(void)
 		mb();
 	}
 }
+#endif
 
 static int dload_set(const char *val, struct kernel_param *kp)
 {
@@ -170,10 +172,12 @@ void set_dload_mode(int on)
 }
 EXPORT_SYMBOL(set_dload_mode);
 
+#if !defined(CONFIG_SAMSUNG_PRODUCT_SHIP)
 static void enable_emergency_dload_mode(void)
 {
 	printk(KERN_ERR "dload mode is not enabled on target\n");
 }
+#endif
 
 static bool get_dload_mode(void)
 {
@@ -281,6 +285,9 @@ static irqreturn_t resout_irq_handler(int irq, void *dev_id)
 	return IRQ_HANDLED;
 }
 
+#if defined CONFIG_ID_BYPASS_SBL
+extern int otg_attached;
+#endif
 static void msm_restart_prepare(const char *cmd)
 {
 	unsigned long value;
@@ -327,11 +334,11 @@ static void msm_restart_prepare(const char *cmd)
 	printk(KERN_NOTICE "Going down for restart now\n");
 	warm_reboot_set = 0;
 
-#ifdef CONFIG_SEC_DEBUG
+
 		if (!restart_reason)
 			restart_reason = ioremap_nocache((unsigned long)(MSM_IMEM_BASE \
 							+ RESTART_REASON_ADDR), SZ_4K);
-#endif
+
 	if (cmd != NULL) {
 		printk(KERN_NOTICE " Reboot cmd=%s\n",cmd);
 		if (!strncmp(cmd, "bootloader", 10)) {
@@ -379,9 +386,11 @@ static void msm_restart_prepare(const char *cmd)
 		} else if (!strncmp(cmd, "nvrecovery", 10)) {
 			__raw_writel(0x77665515, restart_reason);
 			warm_reboot_set = 1;
+#if !defined(CONFIG_SAMSUNG_PRODUCT_SHIP)
 		} else if (!strncmp(cmd, "edl", 3)) {
 			enable_emergency_dload_mode();
 			warm_reboot_set = 1;
+#endif
 		} else if (strlen(cmd) == 0) {
 			printk(KERN_NOTICE "%s : value of cmd is NULL.\n", __func__);
 			__raw_writel(0x12345678, restart_reason);
@@ -390,16 +399,21 @@ static void msm_restart_prepare(const char *cmd)
 			__raw_writel(0x77665507, restart_reason);
 			warm_reboot_set = 1;
 #endif
-		} else if (!strncmp(cmd, "diag", 4)
-				&& !kstrtoul(cmd + 4, 0, &value)) {
-			__raw_writel(0xabcc0000 | value, restart_reason);
 		} else {
-			__raw_writel(0x77665501, restart_reason);
+#if defined CONFIG_ID_BYPASS_SBL
+			if(otg_attached)
+			{
+				__raw_writel(0x77665509, restart_reason);
+				warm_reboot_set = 1;
+			}
+			else
+#endif
+				__raw_writel(0x77665501, restart_reason);
 		}
+
 		printk(KERN_NOTICE "%s : restart_reason = 0x%x\n",
 				__func__, __raw_readl(restart_reason));
 	}
-#ifdef CONFIG_SEC_DEBUG
 	else {
 		printk(KERN_NOTICE "%s: clear reset flag\n", __func__);
 			warm_reboot_set = 1;
@@ -411,7 +425,6 @@ static void msm_restart_prepare(const char *cmd)
 #endif
 		__raw_writel(0x12345678, restart_reason);
 	}
-#endif
 	printk(KERN_NOTICE "%s : restart_reason = 0x%x\n",
 			__func__, __raw_readl(restart_reason));
 	printk(KERN_NOTICE "%s : warm_reboot_set = %d\n",

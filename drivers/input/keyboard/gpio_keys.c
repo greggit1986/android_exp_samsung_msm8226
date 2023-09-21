@@ -421,6 +421,7 @@ static struct attribute_group gpio_keys_attr_group = {
 	.attrs = gpio_keys_attrs,
 };
 
+#ifdef CONFIG_SEC_DVFS
 #ifdef KEY_BOOSTER
 static void gpio_key_change_dvfs_lock(struct work_struct *work)
 {
@@ -494,6 +495,7 @@ static int gpio_key_init_dvfs(struct gpio_button_data *bdata)
 	return 0;
 }
 #endif
+#endif
 
 static void gpio_keys_gpio_report_event(struct gpio_button_data *bdata)
 {
@@ -526,11 +528,13 @@ static void gpio_keys_gpio_work_func(struct work_struct *work)
 	int state = (gpio_get_value_cansleep(button->gpio) ? 1 : 0) ^ button->active_low;
 #endif
 	gpio_keys_gpio_report_event(bdata);
+#ifdef CONFIG_SEC_DVFS
 #ifdef KEY_BOOSTER
 	if (button->code == KEY_HOMEPAGE)
 	{
 		gpio_key_set_dvfs_lock(bdata, !!state);
 	}
+#endif
 #endif
 }
 
@@ -1033,7 +1037,7 @@ static ssize_t sysfs_hall_debounce_store(struct device *dev,
 	return count;
 }
 
-static DEVICE_ATTR(hall_irq_ctrl, S_IRUGO | S_IWUGO,
+static DEVICE_ATTR(hall_irq_ctrl, 0660,
 			sysfs_hall_debounce_show,
 			sysfs_hall_debounce_store);
 #endif
@@ -1495,12 +1499,14 @@ static int __devinit gpio_keys_probe(struct platform_device *pdev)
 		error = gpio_keys_setup_key(pdev, input, bdata, button);
 		if (error)
 			goto fail2;
+#ifdef CONFIG_SEC_DVFS
 #ifdef KEY_BOOSTER
 		error = gpio_key_init_dvfs(bdata);
 		if (error < 0) {
 			dev_err(dev, "Fail get dvfs level for touch booster\n");
 			goto fail2;
 		}
+#endif
 #endif
 		if (button->wakeup)
 			wakeup = 1;

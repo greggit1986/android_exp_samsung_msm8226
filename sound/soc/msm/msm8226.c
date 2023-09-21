@@ -495,7 +495,7 @@ static const struct soc_enum msm_enum[] = {
 	SOC_ENUM_SINGLE_EXT(4, slim0_tx_ch_text),
 };
 
-static const char *const btsco_rate_text[] = {"8000", "16000"};
+static const char *const btsco_rate_text[] = {"BTSCO_RATE_8KHZ", "BTSCO_RATE_16KHZ"};
 static const struct soc_enum msm_btsco_enum[] = {
 	SOC_ENUM_SINGLE_EXT(2, btsco_rate_text),
 };
@@ -1780,7 +1780,7 @@ static struct snd_soc_dai_link msm8226_common_dai[] = {
 		.name = "MSM8226 Compr8",
 		.stream_name = "COMPR8",
 		.cpu_dai_name	= "MultiMedia8",
-		.platform_name  = "msm-compr-dsp",
+		.platform_name  = "msm-compress-dsp",
 		.dynamic = 1,
 		.trigger = {SND_SOC_DPCM_TRIGGER_POST,
 			 SND_SOC_DPCM_TRIGGER_POST},
@@ -2676,7 +2676,7 @@ static struct snd_soc_card *populate_snd_card_dailinks(struct device *dev)
 
 #ifdef CONFIG_SND_SOC_MAX98504
 		extern int system_rev;
-#if defined(CONFIG_MACH_MILLETLTE_OPEN) || defined(CONFIG_MACH_MILLETLTE_KOR)
+#if defined(CONFIG_MACH_MILLETLTE_OPEN) || defined(CONFIG_MACH_MILLETLTE_KOR) || defined(CONFIG_MACH_MILLETLTE_TMO)
 		if ( system_rev >= 0 && system_rev < 3)
 #elif defined (CONFIG_MACH_MILLET3G_EUR) || defined (CONFIG_MACH_BERLUTI3G_EUR)
 		if ( system_rev >= 2 && system_rev < 4)

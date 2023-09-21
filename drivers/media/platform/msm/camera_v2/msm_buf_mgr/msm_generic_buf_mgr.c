@@ -1,4 +1,4 @@
-/* Copyright (c) 2013-2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -41,6 +41,7 @@ static int msm_buf_mngr_get_buf(struct msm_buf_mngr_device *buf_mngr_dev,
 	}
 	new_entry->session_id = buf_info->session_id;
 	new_entry->stream_id = buf_info->stream_id;
+	new_entry->index = new_entry->vb2_buf->v4l2_buf.index;
 	spin_lock_irqsave(&buf_mngr_dev->buf_q_spinlock, flags);
 	list_add_tail(&new_entry->entry, &buf_mngr_dev->buf_qhead);
 	spin_unlock_irqrestore(&buf_mngr_dev->buf_q_spinlock, flags);
@@ -49,7 +50,7 @@ static int msm_buf_mngr_get_buf(struct msm_buf_mngr_device *buf_mngr_dev,
 }
 
 static int msm_buf_mngr_buf_done(struct msm_buf_mngr_device *buf_mngr_dev,
-	struct msm_buf_mngr_info *buf_info)
+								 struct msm_buf_mngr_info *buf_info)
 {
 	unsigned long flags;
 	struct msm_get_bufs *bufs, *save;
@@ -58,15 +59,15 @@ static int msm_buf_mngr_buf_done(struct msm_buf_mngr_device *buf_mngr_dev,
 	spin_lock_irqsave(&buf_mngr_dev->buf_q_spinlock, flags);
 	list_for_each_entry_safe(bufs, save, &buf_mngr_dev->buf_qhead, entry) {
 		if ((bufs->session_id == buf_info->session_id) &&
-			(bufs->stream_id == buf_info->stream_id) &&
-			(bufs->vb2_buf->v4l2_buf.index == buf_info->index)) {
-			bufs->vb2_buf->v4l2_buf.sequence  = buf_info->frame_id;
-			bufs->vb2_buf->v4l2_buf.timestamp = buf_info->timestamp;
-			bufs->vb2_buf->v4l2_buf.reserved = 0;
-			ret = buf_mngr_dev->vb2_ops.buf_done
-					(bufs->vb2_buf,
-						buf_info->session_id,
-						buf_info->stream_id);
+		    (bufs->stream_id == buf_info->stream_id) &&
+		    (bufs->index == buf_info->index)) {
+				ret = buf_mngr_dev->vb2_ops.buf_done
+				      (bufs->vb2_buf,
+				      buf_info->session_id,
+				      buf_info->stream_id,
+				      buf_info->frame_id,
+				      &buf_info->timestamp,
+				      0);
 			list_del_init(&bufs->entry);
 			kfree(bufs);
 			break;
@@ -88,9 +89,9 @@ static int msm_buf_mngr_put_buf(struct msm_buf_mngr_device *buf_mngr_dev,
 	list_for_each_entry_safe(bufs, save, &buf_mngr_dev->buf_qhead, entry) {
 		if ((bufs->session_id == buf_info->session_id) &&
 			(bufs->stream_id == buf_info->stream_id) &&
-			(bufs->vb2_buf->v4l2_buf.index == buf_info->index)) {
-			ret = buf_mngr_dev->vb2_ops.put_buf(bufs->vb2_buf,
-				buf_info->session_id, buf_info->stream_id);
+			(bufs->index == buf_info->index)) {
+				ret = buf_mngr_dev->vb2_ops.put_buf(bufs->vb2_buf,
+													buf_info->session_id, buf_info->stream_id);
 			list_del_init(&bufs->entry);
 			kfree(bufs);
 			break;
@@ -105,16 +106,15 @@ static void msm_buf_mngr_sd_shutdown(struct msm_buf_mngr_device *buf_mngr_dev)
 	unsigned long flags;
 	struct msm_get_bufs *bufs, *save;
 
+	pr_err("%s:%d  E:\n", __func__, __LINE__);
 	spin_lock_irqsave(&buf_mngr_dev->buf_q_spinlock, flags);
 	if (!list_empty(&buf_mngr_dev->buf_qhead)) {
 		list_for_each_entry_safe(bufs,
 			save, &buf_mngr_dev->buf_qhead, entry) {
-			pr_err("%s: Error delete invalid bufs =%x, ses_id=%d, str_id=%d, idx=%d\n",
-				__func__, (unsigned int)bufs, bufs->session_id,
-				bufs->stream_id, bufs->vb2_buf->v4l2_buf.index);
-			list_del_init(&bufs->entry);
-			kfree(bufs);
-		}
+				pr_err("%s:%d  Invalid entry\n", __func__, __LINE__);
+				list_del_init(&bufs->entry);
+				kfree(bufs);
+			}
 	}
 	spin_unlock_irqrestore(&buf_mngr_dev->buf_q_spinlock, flags);
 }
@@ -125,9 +125,9 @@ static int msm_generic_buf_mngr_open(struct v4l2_subdev *sd,
 	int rc = 0;
 	struct msm_buf_mngr_device *buf_mngr_dev = v4l2_get_subdevdata(sd);
 	if (!buf_mngr_dev) {
-		pr_err("%s buf manager device NULL\n", __func__);
-		rc = -ENODEV;
-		return rc;
+	pr_err("%s buf manager device NULL\n", __func__);
+	rc = -ENODEV;
+	return rc;
 	}
 	return rc;
 }
@@ -189,7 +189,7 @@ static struct v4l2_subdev_core_ops msm_buf_mngr_subdev_core_ops = {
 
 static const struct v4l2_subdev_internal_ops
 	msm_generic_buf_mngr_subdev_internal_ops = {
-	.open  = msm_generic_buf_mngr_open,
+	.open = msm_generic_buf_mngr_open,
 	.close = msm_generic_buf_mngr_close,
 };
 
@@ -199,7 +199,6 @@ static const struct v4l2_subdev_ops msm_buf_mngr_subdev_ops = {
 
 static const struct of_device_id msm_buf_mngr_dt_match[] = {
 	{.compatible = "qcom,msm_buf_mngr"},
-	{}
 };
 
 static int __init msm_buf_mngr_init(void)
@@ -229,7 +228,7 @@ static int __init msm_buf_mngr_init(void)
 	rc = msm_sd_register(&msm_buf_mngr_dev->subdev);
 	if (rc != 0) {
 		pr_err("%s: msm_sd_register error = %d\n", __func__, rc);
-		goto end;
+		goto register_error;
 	}
 
 	v4l2_subdev_notify(&msm_buf_mngr_dev->subdev.sd, MSM_SD_NOTIFY_REQ_CB,
@@ -237,8 +236,11 @@ static int __init msm_buf_mngr_init(void)
 
 	INIT_LIST_HEAD(&msm_buf_mngr_dev->buf_qhead);
 	spin_lock_init(&msm_buf_mngr_dev->buf_q_spinlock);
-end:
 	return rc;
+    
+register_error:
+    kfree(msm_buf_mngr_dev); 
+    return rc;
 }
 
 static void __exit msm_buf_mngr_exit(void)

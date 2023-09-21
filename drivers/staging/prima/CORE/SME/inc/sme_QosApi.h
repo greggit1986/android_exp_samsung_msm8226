@@ -35,9 +35,6 @@
   
   \brief prototype for SME QoS APIs
   
-   Copyright 2008 (c) Qualcomm, Incorporated.  All Rights Reserved.
-   
-   Qualcomm Confidential and Proprietary.
   
   ========================================================================*/
 
@@ -60,6 +57,7 @@
 #define SME_QOS_UAPSD_VI      0x02
 #define SME_QOS_UAPSD_BE      0x08
 #define SME_QOS_UAPSD_BK      0x04
+#define WLAN_MAX_DSCP 0x3f
 
 /*-------------------------------------------------------------------------- 
   Type declarations
@@ -366,6 +364,21 @@ sme_QosStatusType sme_QosReleaseReq(tHalHandle hHal, v_U32_t QosFlowID);
 v_BOOL_t sme_QosIsTSInfoAckPolicyValid(tpAniSirGlobal pMac,
     sme_QosWmmTspecInfo * pQoSInfo,
     v_U8_t sessionId);
+
+/*--------------------------------------------------------------------------
+  \brief sme_QosTspecActive() - The SME QoS API exposed to HDD to
+  check no of active Tspecs
+
+  \param pMac - The handle returned by macOpen.
+  \param ac - Determines type of Access Category
+  \param sessionId - sessionId returned by sme_OpenSession.
+
+  \return VOS_TRUE -When there is no error with pSession
+
+  \sa
+  --------------------------------------------------------------------------*/
+v_BOOL_t sme_QosTspecActive(tpAniSirGlobal pMac,
+    WLANTL_ACEnumType ac, v_U8_t sessionId, v_U8_t *pActiveTspec);
 
 
 /*--------------------------------------------------------------------------

@@ -1692,6 +1692,7 @@ int max77888_muic_charger_cb(enum cable_type_muic cable_type)
 	case CABLE_TYPE_SMARTDOCK_MUIC:
 	case CABLE_TYPE_SMARTDOCK_TA_MUIC:
 	case CABLE_TYPE_JIG_UART_OFF_VB_MUIC:
+	case CABLE_TYPE_MMDOCK_MUIC:
 	case CABLE_TYPE_INCOMPATIBLE_MUIC:
 		is_cable_attached = true;
 		break;
@@ -1766,6 +1767,8 @@ int max77888_muic_charger_cb(enum cable_type_muic cable_type)
 	case CABLE_TYPE_CHARGING_CABLE_MUIC:
 		current_cable_type = POWER_SUPPLY_TYPE_POWER_SHARING;
 		break;
+	case CABLE_TYPE_MMDOCK_MUIC:
+		return 0;
 	default:
 		pr_err("%s: invalid type for charger:%d\n",
 				__func__, cable_type);
@@ -2714,7 +2717,7 @@ static int acc_notify(int event)
 	return ret;
 }
 
-static void fsa9485_muic_mhl_cb(bool attached)
+static void fsa9485_muic_mhl_cb(int attached)
 {
 	pr_info("%s : attached_status (%d)\n", __func__, attached);
 	acc_notify(attached);
@@ -3621,7 +3624,9 @@ void sm5502_callback(enum cable_type_t cable_type, int attached)
 {
 	union power_supply_propval value;
 	struct power_supply *psy = power_supply_get_by_name("battery");
+#if defined(CONFIG_MUIC_SUPPORT_CHARGING_CABLE)
 	struct power_supply *psy_ps = power_supply_get_by_name("ps");
+#endif
 	static enum cable_type_t previous_cable_type = CABLE_TYPE_NONE;
 	pr_info("%s, called : cable_type :%d \n",__func__, cable_type);
 #if defined(CONFIG_TOUCHSCREEN_MXTS) ||defined(CONFIG_TOUCHSCREEN_MXT224E) || defined(CONFIG_TOUCHSCREEN_MMS252) || defined(CONFIG_TOUCHSCREEN_MMS300)
@@ -3800,6 +3805,7 @@ if(!poweroff_charging){
 #endif
 		sec_otg_set_vbus_state(attached);
 		break;
+#if defined(CONFIG_MUIC_SUPPORT_CHARGING_CABLE)
 	case CABLE_TYPE_CHARGING_CABLE:
 		if (attached)
 			value.intval = POWER_SUPPLY_TYPE_POWER_SHARING;
@@ -3822,6 +3828,7 @@ if(!poweroff_charging){
                }
 #endif
 		break;
+#endif
 	case CABLE_TYPE_INCOMPATIBLE:
 #if defined(DEBUG_STATUS)
                if (attached)

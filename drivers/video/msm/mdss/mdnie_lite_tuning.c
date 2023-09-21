@@ -48,7 +48,11 @@
 #elif defined(CONFIG_FB_MSM_MIPI_SAMSUNG_YOUM_CMD_FULL_HD_PT_PANEL) // F
 #include "mdnie_lite_tuning_data_flte.h"
 #elif defined(CONFIG_FB_MSM_MIPI_SAMSUNG_OCTA_CMD_WQHD_PT_PANEL) // K
+#if defined(CONFIG_NEW_UX_MDNIE)
+#include "mdnie_lite_tuning_data_klte_fhd_s6e3fa2_newux.h"
+#else
 #include "mdnie_lite_tuning_data_klte_fhd_s6e3fa2.h"
+#endif
 #elif defined(CONFIG_FB_MSM_MIPI_MAGNA_OCTA_CMD_HD_PT_PANEL)
 #include "mdnie_lite_tuning_data_slte_hd_ea8064g.h"
 #elif defined(CONFIG_FB_MSM_MIPI_JDI_TFT_VIDEO_FULL_HD_PT_PANEL) // JACTIVE
@@ -61,9 +65,10 @@
 */
 #elif defined(CONFIG_FB_MSM_MDSS_SAMSUNG_OCTA_VIDEO_720P_PT_PANEL)
 #include "mdnie_lite_tuning_data_fresco.h"
-#elif defined(CONFIG_FB_MSM_MDSS_MAGNA_OCTA_VIDEO_720P_PANEL) \
-	|| defined(CONFIG_FB_MSM_MIPI_MAGNA_OCTA_VIDEO_WXGA_PT_DUAL_PANEL)
+#elif defined(CONFIG_FB_MSM_MDSS_MAGNA_OCTA_VIDEO_720P_PANEL)
 #include "mdnie_lite_tuning_data_kmini.h"
+#elif defined(CONFIG_FB_MSM_MIPI_MAGNA_OCTA_VIDEO_WXGA_PT_DUAL_PANEL) // PATEK
+#include "mdnie_lite_tuning_data_patek.h"
 #elif defined(CONFIG_FB_MSM_MIPI_VIDEO_WVGA_NT35502_PT_PANEL) // KANAS
 #include "mdnie_lite_tuning_data_wvga_nt35502.h"
 #elif defined (CONFIG_FB_MSM_MDSS_SHARP_HD_PANEL)
@@ -205,6 +210,13 @@ const char accessibility_name[ACCESSIBILITY_MAX][20] = {
 	defined(CONFIG_FB_MSM_MDSS_MAGNA_OCTA_VIDEO_720P_PANEL)	|| defined(CONFIG_FB_MSM_MIPI_MAGNA_OCTA_VIDEO_WXGA_PT_DUAL_PANEL) ||\
 	defined(CONFIG_FB_MSM_MIPI_SAMSUNG_OCTA_CMD_WQXGA_S6E3HA1_PT_PANEL) || defined(CONFIG_FB_MSM_MIPI_SAMSUNG_OCTA_VIDEO_FULL_HD_PT_PANEL)
 	"SCREEN_CURTAIN_MODE",
+#endif
+#if defined(CONFIG_FB_MSM_MIPI_SAMSUNG_OCTA_CMD_WQHD_PT_PANEL) || \
+	defined(CONFIG_FB_MSM_MIPI_SAMSUNG_OCTA_CMD_FULL_HD_PT_PANEL)|| defined (CONFIG_FB_MSM_MIPI_MAGNA_OCTA_CMD_HD_PT_PANEL) ||\
+	defined(CONFIG_FB_MSM_MDSS_MAGNA_OCTA_VIDEO_720P_PANEL)	|| defined(CONFIG_FB_MSM_MIPI_MAGNA_OCTA_VIDEO_WXGA_PT_DUAL_PANEL) ||\
+	defined(CONFIG_FB_MSM_MIPI_SAMSUNG_OCTA_CMD_WQXGA_S6E3HA1_PT_PANEL)
+	"GRAYSCALE_MODE",
+	"GRAY_NEGATIVE_MODE",
 #endif
 #endif /* NEGATIVE_COLOR_USE_ACCESSIBILLITY */
 };
@@ -492,7 +504,7 @@ void mDNIe_Set_Mode(void)
 
 #if defined(CONFIG_FB_MSM_MIPI_SAMSUNG_OCTA_CMD_WQHD_PT_PANEL) || defined (CONFIG_FB_MSM_MIPI_MAGNA_OCTA_CMD_HD_PT_PANEL) \
 	|| defined (CONFIG_FB_MSM_MDSS_MAGNA_OCTA_VIDEO_720P_PANEL)
-	else if (mdnie_msd->dstat.auto_brightness == 6) {
+	else if (mdnie_msd->dstat.auto_brightness >= 6 && mdnie_msd->dstat.bright_level == 255) {
 		DPRINT("[LOCAL CE] HBM mode! only LOCAL CE tuning\n");
 #if defined(CONFIG_MDNIE_ENHENCED_LOCAL_CE)
 			INPUT_PAYLOAD1(LOCAL_CE_1_ENHENCED);
@@ -614,8 +626,7 @@ static ssize_t mode_show(struct device *dev,
 	DPRINT("Current Background Mode : %s\n",
 		background_name[mdnie_tun_state.background]);
 
-	return snprintf(buf, 256, "Current Background Mode : %s\n",
-		background_name[mdnie_tun_state.background]);
+	return snprintf(buf, 256, "%d\n", mdnie_tun_state.background);
 }
 
 static ssize_t mode_store(struct device *dev,
@@ -651,6 +662,13 @@ static ssize_t mode_store(struct device *dev,
 
 static DEVICE_ATTR(mode, 0664, mode_show, mode_store);
 
+static ssize_t mode_max_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	return snprintf(buf, 256, "%d\n", MAX_BACKGROUND_MODE);
+}
+static DEVICE_ATTR(mode_max, 0444, mode_max_show, NULL);
+
 static ssize_t scenario_show(struct device *dev,
 					 struct device_attribute *attr,
 					 char *buf)
@@ -658,8 +676,7 @@ static ssize_t scenario_show(struct device *dev,
 	DPRINT("Current Scenario Mode : %s\n",
 		scenario_name[mdnie_tun_state.scenario]);
 
-	return snprintf(buf, 256, "Current Scenario Mode : %s\n",
-		scenario_name[mdnie_tun_state.scenario]);
+	return snprintf(buf, 256, "%d\n", mdnie_tun_state.scenario);
 }
 
 static ssize_t scenario_store(struct device *dev,
@@ -703,6 +720,13 @@ static ssize_t scenario_store(struct device *dev,
 }
 static DEVICE_ATTR(scenario, 0664, scenario_show,
 		   scenario_store);
+
+static ssize_t scenario_max_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	return snprintf(buf, 256, "%d\n", MAX_mDNIe_MODE);
+}
+static DEVICE_ATTR(scenario_max, 0444, scenario_max_show, NULL);
 
 static ssize_t mdnieset_user_select_file_cmd_show(struct device *dev,
 						  struct device_attribute *attr,
@@ -778,8 +802,7 @@ static ssize_t outdoor_show(struct device *dev,
 	DPRINT("Current outdoor Mode : %s\n",
 		outdoor_name[mdnie_tun_state.outdoor]);
 
-	return snprintf(buf, 256, "Current outdoor Mode : %s\n",
-		outdoor_name[mdnie_tun_state.outdoor]);
+	return snprintf(buf, 256, "%d\n", mdnie_tun_state.outdoor);
 }
 
 static ssize_t outdoor_store(struct device *dev,
@@ -820,6 +843,13 @@ static ssize_t outdoor_store(struct device *dev,
 }
 
 static DEVICE_ATTR(outdoor, 0664, outdoor_show, outdoor_store);
+
+static ssize_t outdoor_max_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	return snprintf(buf, 256, "%d\n", MAX_OUTDOOR_MODE);
+}
+static DEVICE_ATTR(outdoor_max, 0444, outdoor_max_show, NULL);
 
 
 #if defined(AUTO_BRIGHTNESS_CABC_FUNCTION)
@@ -951,8 +981,7 @@ static ssize_t accessibility_show(struct device *dev,
 	DPRINT("Current accessibility Mode : %s\n",
 		accessibility_name[mdnie_tun_state.accessibility]);
 
-	return snprintf(buf, 256, "Current accessibility Mode : %s\n",
-		accessibility_name[mdnie_tun_state.accessibility]);
+	return snprintf(buf, 256, "%d\n", mdnie_tun_state.accessibility);
 }
 
 static ssize_t accessibility_store(struct device *dev,
@@ -992,8 +1021,6 @@ static ssize_t accessibility_store(struct device *dev,
 	}
 #ifndef	NEGATIVE_COLOR_USE_ACCESSIBILLITY
 	else if (cmd_value == COLOR_BLIND) {
-		if(mdnie_tun_state.accessibility == COLOR_BLIND)
-			return size;
 		mdnie_tun_state.accessibility = COLOR_BLIND;
 
 		#if defined (CONFIG_FB_MSM_MDSS_SHARP_HD_PANEL)
@@ -1012,6 +1039,21 @@ static ssize_t accessibility_store(struct device *dev,
 		if(mdnie_tun_state.accessibility == SCREEN_CURTAIN)
 			return size;
 		mdnie_tun_state.accessibility = SCREEN_CURTAIN;
+	}
+#endif
+#if defined(CONFIG_FB_MSM_MIPI_SAMSUNG_OCTA_CMD_WQHD_PT_PANEL) || \
+	defined(CONFIG_FB_MSM_MIPI_SAMSUNG_OCTA_CMD_FULL_HD_PT_PANEL)|| defined (CONFIG_FB_MSM_MIPI_MAGNA_OCTA_CMD_HD_PT_PANEL) ||\
+	defined(CONFIG_FB_MSM_MDSS_MAGNA_OCTA_VIDEO_720P_PANEL)	|| defined(CONFIG_FB_MSM_MIPI_MAGNA_OCTA_VIDEO_WXGA_PT_DUAL_PANEL) ||\
+	defined(CONFIG_FB_MSM_MIPI_SAMSUNG_OCTA_CMD_WQXGA_S6E3HA1_PT_PANEL)
+	else if (cmd_value == GRAYSCALE) {
+		if(mdnie_tun_state.accessibility == GRAYSCALE)
+			return size;
+		mdnie_tun_state.accessibility = GRAYSCALE;
+	}
+	else if (cmd_value == GRAYSCALE_NEGATIVE) {
+		if(mdnie_tun_state.accessibility == GRAYSCALE_NEGATIVE)
+			return size;
+		mdnie_tun_state.accessibility = GRAYSCALE_NEGATIVE;
 	}
 #endif
 #endif /* NEGATIVE_COLOR_USE_ACCESSIBILLITY */
@@ -1035,6 +1077,13 @@ static ssize_t accessibility_store(struct device *dev,
 static DEVICE_ATTR(accessibility, 0664,
 			accessibility_show,
 			accessibility_store);
+
+static ssize_t accessibility_max_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	return snprintf(buf, 256, "%d\n", ACCESSIBILITY_MAX);
+}
+static DEVICE_ATTR(accessibility_max, 0444, accessibility_max_show, NULL);
 
 #if defined(CONFIG_FB_MSM_MIPI_SAMSUNG_OCTA_CMD_WQHD_PT_PANEL)
 static ssize_t sensorRGB_show(struct device *dev,
@@ -1085,7 +1134,11 @@ static DEVICE_ATTR(sensorRGB, 0664, sensorRGB_show, sensorRGB_store);
 #define MAX_FILE_NAME	128
 #define TUNING_FILE_PATH "/sdcard/"
 static char tuning_file[MAX_FILE_NAME];
-
+#if 0
+/* 
+ * Do not use below code but only for Image Quality Debug in Developing Precess.
+ * Do not comment in this code Because there are contained vulnerability.
+ */
 static char char_to_dec(char data1, char data2)
 {
 	char dec;
@@ -1190,7 +1243,7 @@ static void load_tuning_file(char *filename)
 	filp = filp_open(filename, O_RDONLY, 0);
 	if (IS_ERR(filp)) {
 		printk(KERN_ERR "%s File open failed\n", __func__);
-		return;
+		goto err;
 	}
 
 	l = filp->f_path.dentry->d_inode->i_size;
@@ -1200,7 +1253,7 @@ static void load_tuning_file(char *filename)
 	if (dp == NULL) {
 		pr_info("Can't not alloc memory for tuning file load\n");
 		filp_close(filp, current->files);
-		return;
+		goto err;
 	}
 	pos = 0;
 	memset(dp, 0, l);
@@ -1213,7 +1266,7 @@ static void load_tuning_file(char *filename)
 		pr_info("vfs_read() filed ret : %d\n", ret);
 		kfree(dp);
 		filp_close(filp, current->files);
-		return;
+		goto err;
 	}
 
 	filp_close(filp, current->files);
@@ -1223,7 +1276,12 @@ static void load_tuning_file(char *filename)
 	sending_tune_cmd(dp, l);
 
 	kfree(dp);
+
+	return;
+err:
+	set_fs(fs);
 }
+#endif
 
 static ssize_t tuning_show(struct device *dev,
 			struct device_attribute *attr, char *buf)
@@ -1238,7 +1296,16 @@ static ssize_t tuning_show(struct device *dev,
 static ssize_t tuning_store(struct device *dev,
 			struct device_attribute *attr, const char *buf, size_t size)
 {
+/* 
+ * Do not use below code but only for Image Quality Debug in Developing Precess.
+ * Do not comment in this code Because there are contained vulnerability.
+ */
+/*
 	char *pt;
+
+	if (buf == NULL || strchr(buf, '.') || strchr(buf, '/'))
+		return size;
+
 	memset(tuning_file, 0, sizeof(tuning_file));
 	snprintf(tuning_file, MAX_FILE_NAME, "%s%s", TUNING_FILE_PATH, buf);
 
@@ -1254,7 +1321,7 @@ static ssize_t tuning_store(struct device *dev,
 	DPRINT("%s\n", tuning_file);
 
 	load_tuning_file(tuning_file);
-
+*/
 	return size;
 }
 static DEVICE_ATTR(tuning, S_IRUGO | S_IWUSR | S_IWGRP,
@@ -1292,6 +1359,11 @@ void init_mdnie_class(void)
 	       dev_attr_scenario.attr.name);
 
 	if (device_create_file
+	    (tune_mdnie_dev, &dev_attr_scenario_max) < 0)
+		pr_err("Failed to create device file(%s)!\n",
+	       dev_attr_scenario_max.attr.name);
+
+	if (device_create_file
 	    (tune_mdnie_dev,
 	     &dev_attr_mdnieset_user_select_file_cmd) < 0)
 		pr_err("Failed to create device file(%s)!\n",
@@ -1308,9 +1380,19 @@ void init_mdnie_class(void)
 			dev_attr_mode.attr.name);
 
 	if (device_create_file
+		(tune_mdnie_dev, &dev_attr_mode_max) < 0)
+		pr_err("Failed to create device file(%s)!\n",
+			dev_attr_mode_max.attr.name);
+
+	if (device_create_file
 		(tune_mdnie_dev, &dev_attr_outdoor) < 0)
 		pr_err("Failed to create device file(%s)!\n",
 	       dev_attr_outdoor.attr.name);
+
+	if (device_create_file
+		(tune_mdnie_dev, &dev_attr_outdoor_max) < 0)
+		pr_err("Failed to create device file(%s)!\n",
+	       dev_attr_outdoor_max.attr.name);
 
 #if defined(AUTO_BRIGHTNESS_CABC_FUNCTION)
 	if (device_create_file
@@ -1335,6 +1417,11 @@ void init_mdnie_class(void)
 		(tune_mdnie_dev, &dev_attr_accessibility) < 0)
 		pr_err("Failed to create device file(%s)!=n",
 			dev_attr_accessibility.attr.name);
+
+	if (device_create_file
+		(tune_mdnie_dev, &dev_attr_accessibility_max) < 0)
+		pr_err("Failed to create device file(%s)!=n",
+			dev_attr_accessibility_max.attr.name);
 
 #if defined(CONFIG_FB_MSM_MIPI_SAMSUNG_OCTA_CMD_WQHD_PT_PANEL)
 	if (device_create_file
@@ -1523,7 +1610,8 @@ static char coordinate_data[][coordinate_data_size] = {
 void coordinate_tunning(int x, int y)
 {
 	int tune_number;
-#if defined(CONFIG_FB_MSM_MIPI_MAGNA_OCTA_CMD_HD_PT_PANEL) || defined(CONFIG_FB_MSM_MIPI_SAMSUNG_OCTA_CMD_WQXGA_S6E3HA1_PT_PANEL)
+#if defined(CONFIG_FB_MSM_MIPI_MAGNA_OCTA_CMD_HD_PT_PANEL) || defined(CONFIG_FB_MSM_MIPI_SAMSUNG_OCTA_CMD_WQXGA_S6E3HA1_PT_PANEL) || \
+	defined(CONFIG_NEW_UX_MDNIE)
 	int i, j;
 #endif
 	tune_number = 0;
@@ -1569,7 +1657,8 @@ void coordinate_tunning(int x, int y)
 	}
 
 	pr_info("%s x : %d, y : %d, tune_number : %d", __func__, x, y, tune_number);
-#if defined(CONFIG_FB_MSM_MIPI_MAGNA_OCTA_CMD_HD_PT_PANEL) || defined(CONFIG_FB_MSM_MIPI_SAMSUNG_OCTA_CMD_WQXGA_S6E3HA1_PT_PANEL)
+#if defined(CONFIG_FB_MSM_MIPI_MAGNA_OCTA_CMD_HD_PT_PANEL) || defined(CONFIG_FB_MSM_MIPI_SAMSUNG_OCTA_CMD_WQXGA_S6E3HA1_PT_PANEL) || \
+	defined(CONFIG_NEW_UX_MDNIE)
 	for(i = 0; i < mDNIe_eBOOK_MODE; i++)
 	{
 		for(j = 0; j < AUTO_MODE; j++)
@@ -1591,12 +1680,14 @@ void coordinate_tunning(int x, int y)
 	memcpy(&DYNAMIC_VT_2[scr_wr_addr], &coordinate_data[tune_number][0], coordinate_data_size);
 	memcpy(&DYNAMIC_EBOOK_2[scr_wr_addr], &coordinate_data[tune_number][0], coordinate_data_size);
 
+#if !defined(CONFIG_FB_MSM_MIPI_MAGNA_OCTA_VIDEO_WXGA_PT_DUAL_PANEL)
 	memcpy(&STANDARD_BROWSER_2[scr_wr_addr], &coordinate_data[tune_number][0], coordinate_data_size);
 	memcpy(&STANDARD_GALLERY_2[scr_wr_addr], &coordinate_data[tune_number][0], coordinate_data_size);
 	memcpy(&STANDARD_UI_2[scr_wr_addr], &coordinate_data[tune_number][0], coordinate_data_size);
 	memcpy(&STANDARD_VIDEO_2[scr_wr_addr], &coordinate_data[tune_number][0], coordinate_data_size);
 	memcpy(&STANDARD_VT_2[scr_wr_addr], &coordinate_data[tune_number][0], coordinate_data_size);
 	memcpy(&STANDARD_EBOOK_2[scr_wr_addr], &coordinate_data[tune_number][0], coordinate_data_size);
+#endif
 
 	memcpy(&AUTO_BROWSER_2[scr_wr_addr], &coordinate_data[tune_number][0], coordinate_data_size);
 	memcpy(&AUTO_CAMERA_2[scr_wr_addr], &coordinate_data[tune_number][0], coordinate_data_size);

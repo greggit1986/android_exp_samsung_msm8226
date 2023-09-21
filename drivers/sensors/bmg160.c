@@ -449,22 +449,35 @@ static void bmg160_work_func(struct work_struct *work)
 	struct timespec ts;
 	int time_hi, time_lo;
 
-	ts = ktime_to_timespec(ktime_get_boottime());
+	ts = ktime_to_timespec(alarm_get_elapsed_realtime());
 	data->timestamp = ts.tv_sec * 1000000000ULL + ts.tv_nsec;
-	time_lo = (int)(data->timestamp & TIME_LO_MASK);
+
 	time_hi = (int)((data->timestamp & TIME_HI_MASK) >> TIME_HI_SHIFT);
+	time_lo = (int)(data->timestamp & TIME_LO_MASK);
 
 	ret = bmg160_read_gyro_xyz(data, &gyro);
 	if (ret < 0)
 		return;
 
-	input_report_rel(data->input, REL_RX, gyro.x - data->caldata.x);
-	input_report_rel(data->input, REL_RY, gyro.y - data->caldata.y);
-	input_report_rel(data->input, REL_RZ, gyro.z - data->caldata.z);
+	data->gyrodata = gyro;
+	gyro.x = gyro.x - data->caldata.x;
+	gyro.y = gyro.y - data->caldata.y;
+	gyro.z = gyro.z - data->caldata.z;
+
+	// 0 value is ignored using input_report_rel.
+	gyro.x = (gyro.x >= 0) ? (gyro.x + 1) : (gyro.x - 1);
+	gyro.y = (gyro.y >= 0) ? (gyro.y + 1) : (gyro.y - 1);
+	gyro.z = (gyro.z >= 0) ? (gyro.z + 1) : (gyro.z - 1);
+	time_hi = (time_hi >= 0) ? (time_hi + 1) : (time_hi - 1);
+	time_lo = (time_lo >= 0) ? (time_lo + 1) : (time_lo - 1);
+
+	input_report_rel(data->input, REL_RX, gyro.x);
+	input_report_rel(data->input, REL_RY, gyro.y);
+	input_report_rel(data->input, REL_RZ, gyro.z);
 	input_report_rel(data->input, REL_X, time_hi);
 	input_report_rel(data->input, REL_Y, time_lo);
 	input_sync(data->input);
-	data->gyrodata = gyro;
+
 }
 
 static void bmg160_set_enable(struct bmg160_p *data, int enable)
@@ -506,6 +519,7 @@ static ssize_t bmg160_enable_store(struct device *dev,
 		if (pre_enable == OFF) {
 			bmg160_open_calibration(data);
 			bmg160_set_mode(data, BMG160_MODE_NORMAL);
+			msleep(60);
 			atomic_set(&data->enable, ON);
 			bmg160_set_enable(data, ON);
 		}
@@ -727,7 +741,7 @@ static ssize_t bmg160_calibration_store(struct device *dev,
 	else
 		bmg160_set_mode(data, BMG160_MODE_NORMAL);
 
-	msleep(100);
+	usleep_range(100000, 101000);
 
 	if (dEnable == 1)
 		bmg160_get_caldata(data);
@@ -751,7 +765,7 @@ static ssize_t bmg160_raw_data_show(struct device *dev,
 
 	if (atomic_read(&data->enable) == OFF) {
 		bmg160_set_mode(data, BMG160_MODE_NORMAL);
-		msleep(30);
+		msleep(60);
 		bmg160_read_gyro_xyz(data, &data->gyrodata);
 		bmg160_set_mode(data, BMG160_MODE_SUSPEND);
 	}
@@ -773,7 +787,7 @@ static ssize_t bmg160_get_temp(struct device *dev,
 	if (atomic_read(&data->enable) == OFF)
 		bmg160_set_mode(data, BMG160_MODE_NORMAL);
 
-	msleep(100);
+	usleep_range(100000, 101000);
 
 	bmg160_i2c_read(data->client, BMG160_TEMP_ADDR, &tmp);
 	temperature = 24 + ((s8)tmp / 2);
@@ -861,7 +875,7 @@ static int bmg160_selftest_show(struct device *dev,
 	else
 		bmg160_set_mode(data, BMG160_MODE_NORMAL);
 
-	msleep(100);
+	usleep_range(100000, 101000);
 	bist = bmg160_selftest(data);
 	if (bist == 0)
 		selftest |= 1;
@@ -869,7 +883,7 @@ static int bmg160_selftest_show(struct device *dev,
 	data->gyro_dps = BMG160_RANGE_2000DPS;
 	bmg160_set_range(data, data->gyro_dps);
 
-	msleep(100);
+	usleep_range(100000, 101000);
 	memset(sum, 0, sizeof(int) * 3);
 	for (cnt = 0; cnt < SELFTEST_DATA_AMOUNT; cnt++) {
 		bmg160_read_gyro_xyz(data, &avg);

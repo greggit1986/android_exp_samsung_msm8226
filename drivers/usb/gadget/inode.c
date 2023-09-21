@@ -309,7 +309,7 @@ nonblock:
 	// case STATE_EP_DISABLED:		/* "can't happen" */
 	// case STATE_EP_READY:			/* "can't happen" */
 	default:				/* error! */
-		pr_debug ("%s: ep %p not available, state %d\n",
+		pr_debug ("%s: ep %pK not available, state %d\n",
 				shortname, epdata, epdata->state);
 		// FALLTHROUGH
 	case STATE_EP_UNBOUND:			/* clean disconnect */
@@ -570,6 +570,7 @@ static ssize_t ep_aio_read_retry(struct kiocb *iocb)
 			break;
 	}
 	kfree(priv->buf);
+	kfree(priv->iv);
 	kfree(priv);
 	return len;
 }
@@ -591,6 +592,7 @@ static void ep_aio_complete(struct usb_ep *ep, struct usb_request *req)
 	 */
 	if (priv->iv == NULL || unlikely(req->actual == 0)) {
 		kfree(req->buf);
+		kfree(priv->iv);
 		kfree(priv);
 		iocb->private = NULL;
 		/* aio_complete() reports bytes-transferred _and_ faults */
@@ -626,7 +628,7 @@ ep_aio_rwtail(
 	struct usb_request	*req;
 	ssize_t			value;
 
-	priv = kmalloc(sizeof *priv, GFP_KERNEL);
+	priv = kzalloc(sizeof *priv, GFP_KERNEL);
 	if (!priv) {
 		value = -ENOMEM;
 fail:
@@ -634,11 +636,19 @@ fail:
 		return value;
 	}
 	iocb->private = priv;
-	priv->iv = iv;
+	if (iv) {
+		priv->iv = kmemdup(iv, nr_segs * sizeof(struct iovec),
+				   GFP_KERNEL);
+		if (!priv->iv) {
+			kfree(priv);
+			goto fail;
+		}
+	}
 	priv->nr_segs = nr_segs;
 
 	value = get_ready_ep(iocb->ki_filp->f_flags, epdata);
 	if (unlikely(value < 0)) {
+		kfree(priv->iv);
 		kfree(priv);
 		goto fail;
 	}
@@ -672,6 +682,7 @@ fail:
 	mutex_unlock(&epdata->lock);
 
 	if (unlikely(value)) {
+		kfree(priv->iv);
 		kfree(priv);
 		put_ep(epdata);
 	} else
@@ -1493,7 +1504,7 @@ gadgetfs_setup (struct usb_gadget *gadget, const struct usb_ctrlrequest *ctrl)
 		}
 		break;
 
-#ifndef	CONFIG_USB_GADGET_PXA25X
+#ifndef	CONFIG_USB_PXA25X
 	/* PXA automagically handles this request too */
 	case USB_REQ_GET_CONFIGURATION:
 		if (ctrl->bRequestType != 0x80)
@@ -1914,7 +1925,7 @@ dev_config (struct file *fd, const char __user *buf, size_t len, loff_t *ptr)
 
 fail:
 	spin_unlock_irq (&dev->lock);
-	pr_debug ("%s: %s fail %Zd, %p\n", shortname, __func__, value, dev);
+	pr_debug ("%s: %s fail %Zd, %pK\n", shortname, __func__, value, dev);
 	kfree (dev->buf);
 	dev->buf = NULL;
 	return value;
@@ -2104,6 +2115,7 @@ static struct file_system_type gadgetfs_type = {
 	.mount		= gadgetfs_mount,
 	.kill_sb	= gadgetfs_kill_sb,
 };
+MODULE_ALIAS_FS("gadgetfs");
 
 /*----------------------------------------------------------------------*/
 

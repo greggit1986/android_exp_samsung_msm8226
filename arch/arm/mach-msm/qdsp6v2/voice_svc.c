@@ -1,4 +1,4 @@
-/* Copyright (c) 2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2014-2019, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -14,6 +14,7 @@
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/errno.h>
+#include <linux/spinlock.h>
 #include <linux/fs.h>
 #include <linux/uaccess.h>
 #include <linux/slab.h>
@@ -26,6 +27,7 @@
 #define DRIVER_NAME "voice_svc"
 #define MINOR_NUMBER 1
 #define APR_MAX_RESPONSE 10
+#define TIMEOUT_MS 1000
 
 #define MAX(a, b) ((a) >= (b) ? (a) : (b))
 
@@ -42,6 +44,12 @@ struct voice_svc_prvt {
 	struct list_head response_queue;
 	wait_queue_head_t response_wait;
 	spinlock_t response_lock;
+	/*
+	 * This mutex ensures responses are processed in sequential order and
+	 * that no two threads access and free the same response at the same
+	 * time.
+	 */
+	struct mutex response_mutex_lock;
 };
 
 struct apr_data {
@@ -61,7 +69,12 @@ static void *dummy_q6_mvm;
 static void *dummy_q6_cvs;
 dev_t device_num;
 
+struct mutex session_lock;
+spinlock_t voicesvc_lock;
+static bool is_released = 1;
 static int voice_svc_dummy_reg(void);
+static int voice_svc_dummy_dereg(void);
+
 static int32_t qdsp_dummy_apr_callback(struct apr_client_data *data,
 					void *priv);
 
@@ -74,6 +87,11 @@ static int32_t qdsp_apr_callback(struct apr_client_data *data, void *priv)
 	if ((data == NULL) || (priv == NULL)) {
 		pr_err("%s: data or priv is NULL\n", __func__);
 		return -EINVAL;
+	}
+	spin_lock(&voicesvc_lock);
+	if (is_released) {
+		spin_unlock(&voicesvc_lock);
+		return 0;
 	}
 
 	prtd = (struct voice_svc_prvt*)priv;
@@ -99,6 +117,7 @@ static int32_t qdsp_apr_callback(struct apr_client_data *data, void *priv)
 		}
 	}
 
+	mutex_lock(&prtd->response_mutex_lock);
 	spin_lock_irqsave(&prtd->response_lock, spin_flags);
 
 	if (prtd->response_count < APR_MAX_RESPONSE) {
@@ -107,7 +126,7 @@ static int32_t qdsp_apr_callback(struct apr_client_data *data, void *priv)
 			GFP_ATOMIC);
 		if (response_list == NULL) {
 			pr_err("%s: kmalloc failed\n", __func__);
-
+			spin_unlock(&voicesvc_lock);
 			return -ENOMEM;
 		}
 
@@ -131,6 +150,7 @@ static int32_t qdsp_apr_callback(struct apr_client_data *data, void *priv)
 
 	spin_unlock_irqrestore(&prtd->response_lock, spin_flags);
 
+	spin_unlock(&voicesvc_lock);
 	return 0;
 }
 
@@ -165,6 +185,7 @@ static int voice_svc_send_req(struct voice_svc_cmd_request *apr_request,
 	void *apr_handle = NULL;
 	struct apr_data *aprdata = NULL;
 	uint32_t user_payload_size = 0;
+	uint32_t payload_size = 0;
 
 	if (apr_request == NULL) {
 		pr_err("%s: apr_request is NULL\n", __func__);
@@ -174,16 +195,20 @@ static int voice_svc_send_req(struct voice_svc_cmd_request *apr_request,
 	}
 
 	user_payload_size = apr_request->payload_size;
-
-	aprdata = kmalloc(sizeof(struct apr_data) + user_payload_size,
-			  GFP_KERNEL);
-
-	if (aprdata == NULL) {
-		pr_err("%s: aprdata kmalloc failed.", __func__);
-
-		ret = -ENOMEM;
+	payload_size = sizeof(struct apr_data) + user_payload_size;
+	if (payload_size <= user_payload_size) {
+		pr_err("%s: invalid payload size ( 0x%x ).\n",
+		__func__, user_payload_size);
+		ret = -EINVAL;
 		goto done;
+	} else {
+		aprdata = kmalloc(payload_size, GFP_KERNEL);
+		if (aprdata == NULL) {
+			ret = -ENOMEM;
+			goto done;
+		}
 	}
+
 
 	voice_svc_update_hdr(apr_request, aprdata, prtd);
 
@@ -194,8 +219,8 @@ static int voice_svc_send_req(struct voice_svc_cmd_request *apr_request,
 	    MAX(sizeof(apr_request->svc_name), sizeof(VOICE_SVC_MVM_STR)))) {
 		apr_handle = prtd->apr_q6_mvm;
 	} else {
-		pr_err("%s: Invalid service %s\n", __func__,
-			apr_request->svc_name);
+		pr_err("%s: Invalid service %.*s\n", __func__,
+			MAX_APR_SERVICE_NAME_LEN, apr_request->svc_name);
 
 		ret = -EINVAL;
 		goto done;
@@ -295,8 +320,8 @@ static int process_reg_cmd(struct voice_svc_register apr_reg_svc,
 		svc = VOICE_SVC_CVS_STR;
 		handle = &prtd->apr_q6_cvs;
 	} else {
-		pr_err("%s: Invalid Service: %s\n", __func__,
-				apr_reg_svc.svc_name);
+		pr_err("%s: Invalid Service: %.*s\n", __func__,
+				MAX_APR_SERVICE_NAME_LEN, apr_reg_svc.svc_name);
 		ret = -EINVAL;
 		goto done;
 	}
@@ -326,6 +351,7 @@ static long voice_svc_ioctl(struct file *file, unsigned int cmd,
 	void __user *arg = (void __user *)u_arg;
 	uint32_t user_payload_size = 0;
 	unsigned long spin_flags;
+	uint32_t payload_size = 0;
 
 	pr_debug("%s: cmd: %u\n", __func__, cmd);
 
@@ -356,16 +382,20 @@ static long voice_svc_ioctl(struct file *file, unsigned int cmd,
 
 		user_payload_size =
 			((struct voice_svc_cmd_request*)arg)->payload_size;
-
-		apr_request = kmalloc(sizeof(struct voice_svc_cmd_request) +
-				      user_payload_size, GFP_KERNEL);
-
-		if (apr_request == NULL) {
-			pr_err("%s: apr_request kmalloc failed.", __func__);
-
-			ret = -ENOMEM;
+		payload_size = sizeof(struct voice_svc_cmd_request) + user_payload_size;
+		if (payload_size <= user_payload_size) {
+			pr_err("%s: invalid payload size ( 0x%x ).\n",
+			__func__, user_payload_size);
+			ret = -EINVAL;
 			goto done;
+		} else {
+			apr_request = kmalloc(payload_size, GFP_KERNEL);
+			if (apr_request == NULL) {
+				ret = -ENOMEM;
+				goto done;
+			}
 		}
+
 
 		if (copy_from_user(apr_request, arg,
 				sizeof(struct voice_svc_cmd_request) +
@@ -450,10 +480,26 @@ static long voice_svc_ioctl(struct file *file, unsigned int cmd,
 			} else {
 				spin_unlock_irqrestore(&prtd->response_lock,
 							spin_flags);
-				wait_event_interruptible(prtd->response_wait,
-					!list_empty(&prtd->response_queue));
-				pr_debug("%s: Interupt recieved for response",
-					 __func__);
+				pr_debug("%s: wait for a response\n", __func__);
+
+				ret = wait_event_interruptible_timeout(
+					prtd->response_wait,
+					!list_empty(&prtd->response_queue),
+					msecs_to_jiffies(TIMEOUT_MS));
+				if (ret == 0) {
+					pr_debug("%s: Read timeout\n", __func__);
+					ret = -ETIMEDOUT;
+					goto unlock;
+				} else if (ret > 0 &&
+					!list_empty(&prtd->response_queue)) {
+					pr_debug("%s: Interrupt recieved for response\n",
+						__func__);
+					ret = 0;
+				} else if (ret < 0) {
+					pr_debug("%s: Interrupted by SIGNAL %d\n",
+						__func__, ret);
+					goto unlock;
+				}
 			}
 		} while(!apr_response);
 		break;
@@ -462,6 +508,8 @@ static long voice_svc_ioctl(struct file *file, unsigned int cmd,
 		ret = -EINVAL;
 	}
 
+unlock:
+	mutex_unlock(&prtd->response_mutex_lock);
 done:
 	if (apr_request != NULL)
 		kfree(apr_request);
@@ -500,16 +548,40 @@ err:
 	return -EINVAL;
 }
 
+static int voice_svc_dummy_dereg(void)
+{
+	pr_debug("%s\n", __func__);
+	if (dummy_q6_mvm != NULL) {
+		apr_deregister(dummy_q6_mvm);
+		dummy_q6_mvm = NULL;
+	}
+
+	if (dummy_q6_cvs != NULL) {
+		apr_deregister(dummy_q6_cvs);
+		dummy_q6_cvs = NULL;
+	}
+	return 0;
+}
+
 static int voice_svc_open(struct inode *inode, struct file *file)
 {
 	struct voice_svc_prvt *prtd = NULL;
+	int ret = 0;
+
+	mutex_lock(&session_lock);
+	if (is_released == 0) {
+		pr_err("%s: Access denied to device\n", __func__);
+		ret = -EBUSY;
+		goto done;
+	}
 
 	prtd = kmalloc(sizeof(struct voice_svc_prvt), GFP_KERNEL);
 
 	if (prtd == NULL) {
 		pr_err("%s: kmalloc failed", __func__);
 
-		return -ENOMEM;
+		ret = -ENOMEM;
+		goto done;
 	}
 
 	memset(prtd, 0, sizeof(struct voice_svc_prvt));
@@ -520,9 +592,10 @@ static int voice_svc_open(struct inode *inode, struct file *file)
 	INIT_LIST_HEAD(&prtd->response_queue);
 	init_waitqueue_head(&prtd->response_wait);
 	spin_lock_init(&prtd->response_lock);
-
+	mutex_init(&prtd->response_mutex_lock);
 	file->private_data = (void*)prtd;
 
+	is_released = 0;
 	/* Current APR implementation doesn't support session based
 	 * multiple service registrations. The apr_deregister()
 	 * function sets the destination and client IDs to zero, if
@@ -533,12 +606,33 @@ static int voice_svc_open(struct inode *inode, struct file *file)
 		voice_svc_dummy_reg();
 		reg_dummy_sess = 1;
 	}
-	return 0;
+done:
+	mutex_unlock(&session_lock);
+	return ret;
 }
 
 static int voice_svc_release(struct inode *inode, struct file *file)
 {
+	struct voice_svc_prvt *prtd = NULL;
+
+	prtd = (struct voice_svc_prvt *)file->private_data;
+	if (prtd == NULL) {
+		pr_err("%s: prtd is NULL\n", __func__);
+		return -EINVAL;
+	}
+
+	if (reg_dummy_sess) {
+		voice_svc_dummy_dereg();
+		reg_dummy_sess = 0;
+	}
+
+	mutex_destroy(&prtd->response_mutex_lock);
+
+	spin_lock(&voicesvc_lock);
 	kfree(file->private_data);
+	is_released = 1;
+	spin_unlock(&voicesvc_lock);
+
 	return 0;
 }
 
@@ -596,6 +690,8 @@ static int voice_svc_probe(struct platform_device *pdev)
 		goto add_err;
 	}
 	pr_debug("%s: Device created\n", __func__);
+	spin_lock_init(&voicesvc_lock);
+	mutex_init(&session_lock);
 	goto done;
 
 add_err:
@@ -615,6 +711,7 @@ static int voice_svc_remove(struct platform_device *pdev)
 	kfree(voice_svc_dev->cdev);
 	device_destroy(voice_svc_class, device_num);
 	class_destroy(voice_svc_class);
+	mutex_destroy(&session_lock);
 	unregister_chrdev_region(0, MINOR_NUMBER);
 	kfree(voice_svc_dev);
 

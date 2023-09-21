@@ -275,7 +275,12 @@ void __init samsung_init_battery(void)
 extern void __init samsung_init_battery(void);
 #endif
 #endif
-#if defined(CONFIG_MACH_AFYONLTE_TMO) || defined(CONFIG_MACH_AFYONLTE_CAN)
+/*#if defined(CONFIG_MACH_AFYONLTE_TMO) || defined(CONFIG_MACH_AFYONLTE_CAN)*/
+
+/* JJEDITSTART - FOR MTR*/
+#if defined(CONFIG_MACH_AFYONLTE_TMO) || defined(CONFIG_MACH_AFYONLTE_CAN) || defined(CONFIG_MACH_AFYONLTE_MTR)
+/* JJEDITEND - FOR MTR*/
+
 extern void __init board_tsp_init(void);
 #endif
 void __init msm8226_init(void)

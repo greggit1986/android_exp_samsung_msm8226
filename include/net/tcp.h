@@ -54,6 +54,8 @@ extern void tcp_time_wait(struct sock *sk, int state, int timeo);
 
 #define MAX_TCP_HEADER	(128 + MAX_HEADER)
 #define MAX_TCP_OPTION_SPACE 40
+#define TCP_MIN_SND_MSS		48
+#define TCP_MIN_GSO_SIZE	(TCP_MIN_SND_MSS - MAX_TCP_OPTION_SPACE)
 
 /* 
  * Never offer a window over 32767 without using window scaling. Some
@@ -252,6 +254,7 @@ extern int sysctl_tcp_tso_win_divisor;
 extern int sysctl_tcp_abc;
 extern int sysctl_tcp_mtu_probing;
 extern int sysctl_tcp_base_mss;
+extern int sysctl_tcp_min_snd_mss;
 extern int sysctl_tcp_workaround_signed_windows;
 extern int sysctl_tcp_slow_start_after_idle;
 extern int sysctl_tcp_max_ssthresh;
@@ -259,6 +262,11 @@ extern int sysctl_tcp_cookie_size;
 extern int sysctl_tcp_thin_linear_timeouts;
 extern int sysctl_tcp_thin_dupack;
 extern int sysctl_tcp_default_init_rwnd;
+
+/* sysctl variables for controlling various tcp parameters */
+extern int sysctl_tcp_delack_seg;
+extern int sysctl_tcp_use_userconfig;
+extern int sysctl_tcp_challenge_ack_limit;
 
 /* sysctl variables for controlling various tcp parameters */
 extern int sysctl_tcp_delack_seg;
@@ -962,6 +970,7 @@ static inline int tcp_prequeue(struct sock *sk, struct sk_buff *skb)
 	if (sysctl_tcp_low_latency || !tp->ucopy.task)
 		return 0;
 
+	skb_dst_force(skb);
 	__skb_queue_tail(&tp->ucopy.prequeue, skb);
 	tp->ucopy.memory += skb->truesize;
 	if (tp->ucopy.memory > sk->sk_rcvbuf) {
@@ -1000,6 +1009,8 @@ static const char *statename[]={
 extern void tcp_set_state(struct sock *sk, int state);
 
 extern void tcp_done(struct sock *sk);
+
+int tcp_abort(struct sock *sk, int err);
 
 static inline void tcp_sack_reset(struct tcp_options_received *rx_opt)
 {
@@ -1245,6 +1256,8 @@ extern int tcp_md5_hash_skb_data(struct tcp_md5sig_pool *, const struct sk_buff 
 extern int tcp_md5_hash_key(struct tcp_md5sig_pool *hp,
 			    const struct tcp_md5sig_key *key);
 
+static inline void tcp_init_send_head(struct sock *sk);
+
 /* write queue abstraction */
 static inline void tcp_write_queue_purge(struct sock *sk)
 {
@@ -1252,6 +1265,7 @@ static inline void tcp_write_queue_purge(struct sock *sk)
 
 	while ((skb = __skb_dequeue(&sk->sk_write_queue)) != NULL)
 		sk_wmem_free_skb(sk, skb);
+	tcp_init_send_head(sk);
 	sk_mem_reclaim(sk);
 	tcp_clear_all_retrans_hints(tcp_sk(sk));
 }
@@ -1310,6 +1324,8 @@ static inline void tcp_check_send_head(struct sock *sk, struct sk_buff *skb_unli
 {
 	if (sk->sk_send_head == skb_unlinked)
 		sk->sk_send_head = NULL;
+	if (tcp_sk(sk)->highest_sack == skb_unlinked)
+		tcp_sk(sk)->highest_sack = NULL;
 }
 
 static inline void tcp_init_send_head(struct sock *sk)

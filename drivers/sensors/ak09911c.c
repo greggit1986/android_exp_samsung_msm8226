@@ -33,14 +33,16 @@
 #include "ak09911c_reg.h"
 
 /* Rx buffer size. i.e ST,TMPS,H1X,H1Y,H1Z*/
-#define SENSOR_DATA_SIZE		9
-#define AK09911C_DEFAULT_DELAY		200000000LL
-#define AK09911C_DRDY_TIMEOUT_MS	100
-#define AK09911C_WIA1_VALUE		0x48
-#define AK09911C_WIA2_VALUE		0x05
+#define SENSOR_DATA_SIZE				9
+#define AK09911C_DEFAULT_DELAY			200000000LL
+#define BASE_DELAY                 		20000000LL
+#define MOD_DELAY                   	1000000LL
+#define AK09911C_DRDY_TIMEOUT_MS		100
+#define AK09911C_WIA1_VALUE				0x48
+#define AK09911C_WIA2_VALUE				0x05
 
-#define I2C_M_WR                        0 /* for i2c Write */
-#define I2c_M_RD                        1 /* for i2c Read */
+#define I2C_M_WR						0 /* for i2c Write */
+#define I2c_M_RD						1 /* for i2c Read */
 
 #define VENDOR_NAME                     "AKM"
 #define MODEL_NAME                      "AK09911C"
@@ -137,7 +139,6 @@ static int ak09911c_i2c_write(struct i2c_client *client,
 static int ak09911c_i2c_read_block(struct i2c_client *client,
 		unsigned char reg_addr, unsigned char *buf, unsigned char len)
 {
-#if defined(CONFIG_SEC_BERLUTI_PROJECT)
 	int ret;
 	struct i2c_msg msg[2];
 
@@ -159,14 +160,6 @@ static int ak09911c_i2c_read_block(struct i2c_client *client,
 	}
 
 	return 0;
-#else
-	int i, ret = 0;
-
-	for (i = 0; i < len; i++)
-		ret += ak09911c_i2c_read(client, reg_addr + i, &buf[i]);
-
-	return ret;
-#endif
 }
 
 static int ak09911c_ecs_set_mode_power_down(struct ak09911c_p *data)
@@ -233,14 +226,15 @@ again:
 
 	/* Check ST bit */
 	if (!(temp[0] & 0x01)) {
-		if ((retries++ < 5) && (temp[0] == 0)) {
-#if !defined(CONFIG_SEC_BERLUTI_PROJECT)
-			mdelay(2);
-#endif
+		if ((retries++ < 3) && (temp[0] == 0)) {
 			goto again;
 		} else {
-			ret = -1;
-			goto exit_i2c_read_fail;
+			// If data is not ready to read, store previous data to avoid event gap
+			mag->x = data->magdata.x;
+			mag->y = data->magdata.y;
+			mag->z = data->magdata.z;
+			ret = 0;
+			goto exit;
 		}
 	}
 
@@ -252,7 +246,7 @@ again:
 	/* Check ST2 bit */
 	if ((temp[8] & 0x08)) {
 		ret = -EAGAIN;
-		goto exit_i2c_read_fail;
+		goto exit_i2c_read_err;
 	}
 #endif
 	mag->x = temp[1] | (temp[2] << 8);
@@ -263,7 +257,6 @@ again:
 
 	goto exit;
 
-exit_i2c_read_fail:
 exit_i2c_read_err:
 	pr_err("[SENSOR]: %s - ST1 = %u, ST2 = %u\n",
 		__func__, temp[0], temp[8]);
@@ -283,12 +276,20 @@ static void ak09911c_work_func(struct work_struct *work)
 			struct ak09911c_p, work);
 	unsigned long delay = nsecs_to_jiffies(atomic_read(&data->delay));
 
-	ts = ktime_to_timespec(ktime_get_boottime());
+	ts = ktime_to_timespec(alarm_get_elapsed_realtime());
 	data->timestamp = ts.tv_sec * 1000000000ULL + ts.tv_nsec;
-	time_lo = (int)(data->timestamp & TIME_LO_MASK);
+	
 	time_hi = (int)((data->timestamp & TIME_HI_MASK) >> TIME_HI_SHIFT);
+	time_lo = (int)(data->timestamp & TIME_LO_MASK);
 
 	ret = ak09911c_read_mag_xyz(data, &mag);
+
+	// 0 value is ignored using input_report_rel.
+	mag.x = (mag.x >= 0) ? (mag.x + 1) : (mag.x - 1);
+	mag.y = (mag.y >= 0) ? (mag.y + 1) : (mag.y - 1);
+	mag.z = (mag.z >= 0) ? (mag.z + 1) : (mag.z - 1);
+	time_hi = (time_hi >= 0) ? (time_hi + 1) : (time_hi - 1);
+	time_lo = (time_lo >= 0) ? (time_lo + 1) : (time_lo - 1);
 
 	if (ret >= 0) {
 		input_report_rel(data->input, REL_X, mag.x);
@@ -372,6 +373,9 @@ static ssize_t ak09911c_delay_store(struct device *dev,
 		pr_err("[SENSOR]: %s - Invalid Argument\n", __func__);
 		return ret;
 	}
+
+	if (delay >= BASE_DELAY)
+		delay = delay - MOD_DELAY;
 
 	atomic_set(&data->delay, (int64_t)delay);
 	pr_info("[SENSOR]: %s - poll_delay = %lld\n", __func__, delay);

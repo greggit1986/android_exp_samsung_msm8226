@@ -2,7 +2,7 @@
  * Broadcom Dongle Host Driver (DHD)
  * Prefered Network Offload and Wi-Fi Location Service(WLS) code.
  *
- * Copyright (C) 1999-2015, Broadcom Corporation
+ * Copyright (C) 1999-2016, Broadcom Corporation
  * 
  *      Unless you and Broadcom execute a separate written software license
  * agreement governing use of this software, this software is licensed to you
@@ -162,7 +162,7 @@ _dhd_pno_enable(dhd_pub_t *dhd, int enable)
 	}
 	if (enable) {
 		if ((_pno_state->pno_mode & DHD_PNO_LEGACY_MODE) &&
-			dhd_is_associated(dhd, NULL, NULL)) {
+			dhd_is_associated(dhd, 0, NULL)) {
 			DHD_ERROR(("%s Legacy PNO mode cannot be enabled "
 				"in assoc mode , ignore it\n", __FUNCTION__));
 			err = BCME_BADOPTION;
@@ -1339,9 +1339,10 @@ _dhd_pno_get_for_batch(dhd_pub_t *dhd, char *buf, int bufsize, int reason)
 		list_del(&pscan_results->list);
 		MFREE(dhd->osh, pscan_results, SCAN_RESULTS_SIZE);
 		_params->params_batch.get_batch.top_node_cnt--;
+	} else {
+		/* increase total scan count using current scan count */
+		_params->params_batch.get_batch.tot_scan_cnt += pscan_results->cnt_header;
 	}
-	/* increase total scan count using current scan count */
-	_params->params_batch.get_batch.tot_scan_cnt += pscan_results->cnt_header;
 
 	if (buf && bufsize) {
 		/* This is a first try to get batching results */

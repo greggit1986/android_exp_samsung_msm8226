@@ -614,7 +614,7 @@ static int llc_wait_data(struct sock *sk, long timeo)
 		if (signal_pending(current))
 			break;
 		rc = 0;
-		if (sk_wait_data(sk, &timeo))
+		if (sk_wait_data(sk, &timeo, NULL))
 			break;
 	}
 	return rc;
@@ -716,7 +716,7 @@ static int llc_ui_recvmsg(struct kiocb *iocb, struct socket *sock,
 	unsigned long cpu_flags;
 	size_t copied = 0;
 	u32 peek_seq = 0;
-	u32 *seq;
+	u32 *seq, skb_len;
 	unsigned long used;
 	int target;	/* Read at least this many bytes */
 	long timeo;
@@ -803,7 +803,7 @@ static int llc_ui_recvmsg(struct kiocb *iocb, struct socket *sock,
 			release_sock(sk);
 			lock_sock(sk);
 		} else
-			sk_wait_data(sk, &timeo);
+			sk_wait_data(sk, &timeo, NULL);
 
 		if ((flags & MSG_PEEK) && peek_seq != llc->copied_seq) {
 			if (net_ratelimit())
@@ -814,6 +814,7 @@ static int llc_ui_recvmsg(struct kiocb *iocb, struct socket *sock,
 		}
 		continue;
 	found_ok_skb:
+		skb_len = skb->len;
 		/* Ok so how much can we use? */
 		used = skb->len - offset;
 		if (len < used)
@@ -840,13 +841,13 @@ static int llc_ui_recvmsg(struct kiocb *iocb, struct socket *sock,
 
 		if (!(flags & MSG_PEEK)) {
 			spin_lock_irqsave(&sk->sk_receive_queue.lock, cpu_flags);
-			sk_eat_skb(sk, skb, 0);
+			sk_eat_skb(sk, skb, false);
 			spin_unlock_irqrestore(&sk->sk_receive_queue.lock, cpu_flags);
 			*seq = 0;
 		}
 
 		/* Partial read */
-		if (used + offset < skb->len)
+		if (used + offset < skb_len)
 			continue;
 	} while (len > 0);
 
@@ -863,7 +864,7 @@ copy_uaddr:
 
 	if (!(flags & MSG_PEEK)) {
 			spin_lock_irqsave(&sk->sk_receive_queue.lock, cpu_flags);
-			sk_eat_skb(sk, skb, 0);
+			sk_eat_skb(sk, skb, false);
 			spin_unlock_irqrestore(&sk->sk_receive_queue.lock, cpu_flags);
 			*seq = 0;
 	}
@@ -971,14 +972,13 @@ static int llc_ui_getname(struct socket *sock, struct sockaddr *uaddr,
 	struct sockaddr_llc sllc;
 	struct sock *sk = sock->sk;
 	struct llc_sock *llc = llc_sk(sk);
-	int rc = 0;
+	int rc = -EBADF;
 
 	memset(&sllc, 0, sizeof(sllc));
 	lock_sock(sk);
 	if (sock_flag(sk, SOCK_ZAPPED))
 		goto out;
 	*uaddrlen = sizeof(sllc);
-	memset(uaddr, 0, *uaddrlen);
 	if (peer) {
 		rc = -ENOTCONN;
 		if (sk->sk_state != TCP_ESTABLISHED)

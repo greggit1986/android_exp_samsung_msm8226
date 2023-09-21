@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -398,13 +398,13 @@ int mdss_mdp_perf_calc_pipe(struct mdss_mdp_pipe *pipe,
 	} else {
 		perf->bw_overlap = (quota / dst.h) * v_total;
 	}
-
+#if !defined(CONFIG_MACH_VIENNA) && !defined(CONFIG_SEC_MILLET_PROJECT) && !defined(CONFIG_MACH_LT03) && !defined(CONFIG_SEC_K_PROJECT)
      /* The following change has been taken from CL 2767750. The bw has been increased as a fix
       * for underrun during UHD video play cases. */
 	if ( ((pipe->src.h * pipe->src.w) / (pipe->dst.h * pipe->dst.w)) > 6) {
 		perf->bw_overlap = perf->bw_overlap * 2;
 	}
-
+#endif
 	if (apply_fudge)
 		perf->mdp_clk_rate = mdss_mdp_clk_fudge_factor(mixer, rate);
 	else
@@ -707,8 +707,7 @@ int mdss_mdp_perf_bw_check(struct mdss_mdp_ctl *ctl,
 {
 	struct mdss_data_type *mdata = ctl->mdata;
 	struct mdss_mdp_perf_params perf;
-	u32 bw, threshold, i;
-	u64 bw_sum_of_intfs = 0;
+	u32 bw, threshold;
 
 	/* we only need bandwidth check on real-time clients (interfaces) */
 	if (ctl->intf_type == MDSS_MDP_NO_INTF)
@@ -717,21 +716,12 @@ int mdss_mdp_perf_bw_check(struct mdss_mdp_ctl *ctl,
 	__mdss_mdp_perf_calc_ctl_helper(ctl, &perf,
 			left_plist, left_cnt, right_plist, right_cnt);
 
-	ctl->bw_pending = perf.bw_ctl;
- 
-	for (i = 0; i < mdata->nctl; i++) {
-	struct mdss_mdp_ctl *temp = mdata->ctl_off + i;
-	if (temp->power_on && (temp->intf_type != MDSS_MDP_NO_INTF))
-	bw_sum_of_intfs += temp->bw_pending;
-	}
 
 	/* convert bandwidth to kb */
-	bw = DIV_ROUND_UP_ULL(bw_sum_of_intfs, 1000);
+	bw = DIV_ROUND_UP_ULL(perf.bw_ctl, 1000);
 	pr_debug("calculated bandwidth=%uk\n", bw);
 
-	threshold = (ctl->is_video_mode ||
-	mdss_mdp_video_mode_intf_connected(ctl)) ?
-	mdata->max_bw_low : mdata->max_bw_high;
+	threshold = ctl->is_video_mode ? mdata->max_bw_low : mdata->max_bw_high;
 	if (bw > threshold) {
 		pr_debug("exceeds bandwidth: %ukb > %ukb\n", bw, threshold);
 		return -E2BIG;
@@ -2293,6 +2283,7 @@ int mdss_mdp_ctl_addr_setup(struct mdss_data_type *mdata,
 {
 	struct mdss_mdp_ctl *head;
 	struct mutex *shared_lock = NULL;
+	struct mutex *wb_lock = NULL;
 	u32 i;
 	u32 size = len;
 
@@ -2306,6 +2297,14 @@ int mdss_mdp_ctl_addr_setup(struct mdss_data_type *mdata,
 			return -ENOMEM;
 		}
 		mutex_init(shared_lock);
+		wb_lock = devm_kzalloc(&mdata->pdev->dev,
+					   sizeof(struct mutex),
+					   GFP_KERNEL);
+		if (!wb_lock) {
+			pr_err("unable to allocate mem for mutex\n");
+			return -ENOMEM;
+		}
+		mutex_init(wb_lock);
 	}
 
 	head = devm_kzalloc(&mdata->pdev->dev, sizeof(struct mdss_mdp_ctl) *
@@ -2325,6 +2324,7 @@ int mdss_mdp_ctl_addr_setup(struct mdss_data_type *mdata,
 
 	if (!mdata->has_wfd_blk) {
 		head[len - 1].shared_lock = shared_lock;
+		head[len - 1].wb_lock = wb_lock;
 		/*
 		 * Allocate a virtual ctl to be able to perform simultaneous
 		 * line mode and block mode operations on the same
@@ -2342,30 +2342,25 @@ struct mdss_mdp_mixer *mdss_mdp_mixer_get(struct mdss_mdp_ctl *ctl, int mux)
 {
 	struct mdss_mdp_mixer *mixer = NULL;
 	struct mdss_overlay_private *mdp5_data = NULL;
-	bool is_mixer_swapped = false;
-
-	if (!ctl) {
+	if (!ctl || !ctl->mfd) {
 		pr_err("ctl not initialized\n");
 		return NULL;
 	}
 
-	if (ctl->mfd) {
-		mdp5_data = mfd_to_mdp5_data(ctl->mfd);
-		if (!mdp5_data) {
-			pr_err("mdp5_data not initialized\n");
-			return NULL;
-		}
-		is_mixer_swapped = mdp5_data->mixer_swap;
+	mdp5_data = mfd_to_mdp5_data(ctl->mfd);
+	if (!mdp5_data) {
+		pr_err("ctl not initialized\n");
+		return NULL;
 	}
 
 	switch (mux) {
 	case MDSS_MDP_MIXER_MUX_DEFAULT:
 	case MDSS_MDP_MIXER_MUX_LEFT:
-		mixer = is_mixer_swapped ?
+		mixer = mdp5_data->mixer_swap ?
 			ctl->mixer_right : ctl->mixer_left;
 		break;
 	case MDSS_MDP_MIXER_MUX_RIGHT:
-		mixer = is_mixer_swapped ?
+		mixer = mdp5_data->mixer_swap ?
 			ctl->mixer_left : ctl->mixer_right;
 		break;
 	}
@@ -2662,7 +2657,10 @@ int mdss_mdp_display_commit(struct mdss_mdp_ctl *ctl, void *arg)
 	int mixer1_changed, mixer2_changed;
 	int ret = 0;
 	bool is_bw_released;
-
+	
+#if defined(CONFIG_FB_MSM_CAMERA_CSC)
+	struct mdss_overlay_private *mdp5_data = NULL;
+#endif
 	if (!ctl) {
 		pr_err("display function not set\n");
 		return -ENODEV;
@@ -2735,7 +2733,7 @@ int mdss_mdp_display_commit(struct mdss_mdp_ctl *ctl, void *arg)
 	if (ctl->wait_pingpong)
 		ctl->wait_pingpong(ctl, NULL);
 	ATRACE_END("wait_pingpong");
-
+	
 	ctl->roi_bkup.w = ctl->roi.w;
 	ctl->roi_bkup.h = ctl->roi.h;
 
@@ -2754,6 +2752,31 @@ int mdss_mdp_display_commit(struct mdss_mdp_ctl *ctl, void *arg)
 	wmb();
 	ctl->flush_bits = 0;
 
+#if defined(CONFIG_FB_MSM_CAMERA_CSC)
+	if(ctl->mfd)
+		mdp5_data = mfd_to_mdp5_data(ctl->mfd);
+
+	if (mdp5_data) {
+		if (csc_change == 1) {
+			struct mdss_mdp_pipe *pipe, *next;
+			mutex_lock(&mdp5_data->list_lock);
+			list_for_each_entry_safe(pipe, next, &mdp5_data->pipes_used, list) {
+				if (pipe->type == MDSS_MDP_PIPE_TYPE_VIG) {
+					if (ctl->wait_video_pingpong) {
+						mdss_mdp_irq_enable(MDSS_MDP_IRQ_PING_PONG_COMP, ctl->num);
+						ctl->wait_video_pingpong(ctl, NULL);
+					}
+					pr_info(" mdss_mdp_csc_setup start\n");
+					mdss_mdp_csc_setup(MDSS_MDP_BLOCK_SSPP, pipe->num, 1,
+										MDSS_MDP_CSC_YUV2RGB);
+					csc_change = 0;
+				}
+			}
+			mutex_unlock(&mdp5_data->list_lock);
+		}
+	}
+
+#endif
 	mdss_mdp_xlog_mixer_reg(ctl);
 
 	if (ctl->display_fnc)

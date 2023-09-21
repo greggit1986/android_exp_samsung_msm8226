@@ -83,6 +83,7 @@ struct max86900_device_data
 	struct input_dev *hrm_input_dev;
 	struct mutex i2clock;
 	struct mutex activelock;
+	struct mutex storelock;
 #if defined(CONFIG_SENSORS_SSP_STM_HESTIA)
 	int ldo_en;
 	int vdd_en;

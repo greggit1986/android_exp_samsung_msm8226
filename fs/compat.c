@@ -401,12 +401,28 @@ static int put_compat_flock64(struct flock *kfl, struct compat_flock64 __user *u
 }
 #endif
 
+static unsigned int
+convert_fcntl_cmd(unsigned int cmd)
+{
+	switch (cmd) {
+	case F_GETLK64:
+		return F_GETLK;
+	case F_SETLK64:
+		return F_SETLK;
+	case F_SETLKW64:
+		return F_SETLKW;
+	}
+
+	return cmd;
+}
+
 asmlinkage long compat_sys_fcntl64(unsigned int fd, unsigned int cmd,
 		unsigned long arg)
 {
 	mm_segment_t old_fs;
 	struct flock f;
 	long ret;
+	unsigned int conv_cmd;
 
 	switch (cmd) {
 	case F_GETLK:
@@ -443,16 +459,18 @@ asmlinkage long compat_sys_fcntl64(unsigned int fd, unsigned int cmd,
 	case F_GETLK64:
 	case F_SETLK64:
 	case F_SETLKW64:
+	case F_OFD_GETLK:
+	case F_OFD_SETLK:
+	case F_OFD_SETLKW:
 		ret = get_compat_flock64(&f, compat_ptr(arg));
 		if (ret != 0)
 			break;
 		old_fs = get_fs();
 		set_fs(KERNEL_DS);
-		ret = sys_fcntl(fd, (cmd == F_GETLK64) ? F_GETLK :
-				((cmd == F_SETLK64) ? F_SETLK : F_SETLKW),
-				(unsigned long)&f);
+		conv_cmd = convert_fcntl_cmd(cmd);
+		ret = sys_fcntl(fd, conv_cmd, (unsigned long)&f);
 		set_fs(old_fs);
-		if (cmd == F_GETLK64 && ret == 0) {
+		if ((conv_cmd == F_GETLK || conv_cmd == F_OFD_GETLK) && ret == 0) {
 			/* need to return lock information - see above for commentary */
 			if (f.l_start > COMPAT_LOFF_T_MAX)
 				ret = -EOVERFLOW;
@@ -473,8 +491,15 @@ asmlinkage long compat_sys_fcntl64(unsigned int fd, unsigned int cmd,
 asmlinkage long compat_sys_fcntl(unsigned int fd, unsigned int cmd,
 		unsigned long arg)
 {
-	if ((cmd == F_GETLK64) || (cmd == F_SETLK64) || (cmd == F_SETLKW64))
+	switch (cmd) {
+	case F_GETLK64:
+	case F_SETLK64:
+	case F_SETLKW64:
+	case F_OFD_GETLK:
+	case F_OFD_SETLK:
+	case F_OFD_SETLKW:
 		return -EINVAL;
+	}
 	return compat_sys_fcntl64(fd, cmd, arg);
 }
 
@@ -557,6 +582,10 @@ ssize_t compat_rw_copy_check_uvector(int type,
 			goto out;
 	}
 	*ret_pointer = iov;
+
+	ret = -EFAULT;
+	if (!access_ok(VERIFY_READ, uvector, nr_segs*sizeof(*uvector)))
+		goto out;
 
 	/*
 	 * Single unix specification:
@@ -1089,17 +1118,12 @@ static ssize_t compat_do_readv_writev(int type, struct file *file,
 	if (!file->f_op)
 		goto out;
 
-	ret = -EFAULT;
-	if (!access_ok(VERIFY_READ, uvector, nr_segs*sizeof(*uvector)))
-		goto out;
-
-	tot_len = compat_rw_copy_check_uvector(type, uvector, nr_segs,
+	ret = compat_rw_copy_check_uvector(type, uvector, nr_segs,
 					       UIO_FASTIOV, iovstack, &iov, 1);
-	if (tot_len == 0) {
-		ret = 0;
+	if (ret <= 0)
 		goto out;
-	}
 
+	tot_len = ret;
 	ret = rw_verify_area(type, file, pos, tot_len);
 	if (ret < 0)
 		goto out;
@@ -1160,11 +1184,14 @@ compat_sys_readv(unsigned long fd, const struct compat_iovec __user *vec,
 	struct file *file;
 	int fput_needed;
 	ssize_t ret;
+	loff_t pos;
 
 	file = fget_light(fd, &fput_needed);
 	if (!file)
 		return -EBADF;
-	ret = compat_readv(file, vec, vlen, &file->f_pos);
+	pos = file->f_pos;
+	ret = compat_readv(file, vec, vlen, &pos);
+	file->f_pos = pos;
 	fput_light(file, fput_needed);
 	return ret;
 }
@@ -1226,11 +1253,14 @@ compat_sys_writev(unsigned long fd, const struct compat_iovec __user *vec,
 	struct file *file;
 	int fput_needed;
 	ssize_t ret;
+	loff_t pos;
 
 	file = fget_light(fd, &fput_needed);
 	if (!file)
 		return -EBADF;
-	ret = compat_writev(file, vec, vlen, &file->f_pos);
+	pos = file->f_pos;
+	ret = compat_writev(file, vec, vlen, &pos);
+	file->f_pos = pos;
 	fput_light(file, fput_needed);
 	return ret;
 }

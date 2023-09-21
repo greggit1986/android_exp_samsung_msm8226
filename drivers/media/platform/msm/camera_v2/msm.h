@@ -14,10 +14,10 @@
 #define _MSM_H
 
 #include <linux/version.h>
-#include <linux/completion.h>
 #include <linux/i2c.h>
 #include <linux/videodev2.h>
 #include <linux/pm_qos.h>
+#include <linux/wakelock.h>
 #include <linux/msm_ion.h>
 #include <linux/iommu.h>
 #include <media/v4l2-dev.h>
@@ -30,13 +30,15 @@
 #include <media/videobuf2-msm-mem.h>
 #include <media/msmb_camera.h>
 
-#define MSM_POST_EVT_TIMEOUT 5000
+#define MSM_POST_EVT_TIMEOUT 10000
+#define MSM_POST_STREAMOFF_EVT_TIMEOUT 9000
 #define MSM_POST_EVT_NOTIMEOUT 0xFFFFFFFF
+#define CAMERA_DISABLE_PC_LATENCY 100
+#define CAMERA_ENABLE_PC_LATENCY PM_QOS_DEFAULT_VALUE
 
 struct msm_video_device {
 	struct video_device *vdev;
 	atomic_t opened;
-	atomic_t stream_cnt;
 };
 
 struct msm_queue_head {
@@ -71,7 +73,7 @@ struct msm_command {
 struct msm_command_ack {
 	struct list_head list;
 	struct msm_queue_head command_q;
-	struct completion wait_complete;
+	wait_queue_head_t wait;
 	int stream_id;
 };
 
@@ -100,8 +102,11 @@ struct msm_session {
 	 * session struct msm_stream */
 	struct msm_queue_head stream_q;
 	struct mutex lock;
+	rwlock_t stream_rwlock;
 };
-
+void msm_pm_qos_update_request(int val);
+int msm_cam_get_module_init_status(void);
+int msm_module_init_status(void);
 int msm_post_event(struct v4l2_event *event, int timeout);
 int  msm_create_session(unsigned int session, struct video_device *vdev);
 int msm_destroy_session(unsigned int session_id);
@@ -111,10 +116,12 @@ int msm_create_stream(unsigned int session_id,
 void msm_delete_stream(unsigned int session_id, unsigned int stream_id);
 int  msm_create_command_ack_q(unsigned int session_id, unsigned int stream_id);
 void msm_delete_command_ack_q(unsigned int session_id, unsigned int stream_id);
-struct msm_stream *msm_get_stream(unsigned int session_id,
-	unsigned int stream_id);
+struct msm_session *msm_get_session(unsigned int session_id);
+struct msm_stream *msm_get_stream(struct msm_session *session,
+				  unsigned int stream_id);
 struct vb2_queue *msm_get_stream_vb2q(unsigned int session_id,
 	unsigned int stream_id);
 struct msm_stream *msm_get_stream_from_vb2q(struct vb2_queue *q);
+struct msm_session *msm_get_session_from_vb2q(struct vb2_queue *q);
 struct msm_session *msm_session_find(unsigned int session_id);
 #endif /*_MSM_H */
